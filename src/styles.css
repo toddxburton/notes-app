@@ -266,9 +266,6 @@ input, textarea, [contenteditable="true"] { caret-color: #171716; }
 .document-body a { color: #4d55a7; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .document-body .comment-anchor {
   position: relative;
-  background: #f0eeff;
-  box-shadow: inset 0 -2px 0 var(--purple);
-  border-radius: 2px;
   cursor: pointer;
 }
 .document-body .comment-anchor::after {
