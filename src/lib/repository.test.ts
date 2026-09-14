@@ -6,6 +6,7 @@ import {
   loadWorkspace,
   saveDocumentDraft,
   updateDocument,
+  updateDocumentLayout,
 } from "./repository";
 
 vi.mock("./supabase", () => ({ supabase: null }));
@@ -43,6 +44,23 @@ describe("local workspace repository", () => {
     await updateDocument(null, created.id, { deleted_at: new Date().toISOString() });
 
     expect((await loadWorkspace(null)).documents).toEqual([]);
+  });
+
+  it("persists note ordering and project moves", async () => {
+    const content = { type: "doc", content: [{ type: "paragraph" }] };
+    const first = await createDocument(null, "First", content, "", null, 0);
+    const second = await createDocument(null, "Second", content, "", null, 1);
+
+    await updateDocumentLayout(null, [
+      { id: second.id, project_id: "project-1", sort_order: 0 },
+      { id: first.id, project_id: null, sort_order: 0 },
+    ]);
+
+    const workspace = await loadWorkspace(null);
+    expect(workspace.documents.find((document) => document.id === second.id)).toMatchObject({
+      project_id: "project-1",
+      sort_order: 0,
+    });
   });
 
   it("restores a newer unsynced browser draft", async () => {

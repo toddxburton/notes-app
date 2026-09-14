@@ -102,7 +102,8 @@ export async function loadWorkspace(userId?: string | null): Promise<WorkspaceDa
 
   const [projectsResult, documentsResult, commentsResult, repliesResult, settingsResult] = await Promise.all([
     supabase.from("projects").select("*").order("created_at", { ascending: true }),
-    supabase.from("documents").select("*").is("deleted_at", null).order("updated_at", { ascending: false }),
+    supabase.from("documents").select("*").is("deleted_at", null)
+      .order("sort_order", { ascending: true }).order("updated_at", { ascending: false }),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
     supabase.from("comment_replies").select("*").order("created_at", { ascending: true }),
     supabase.from("workspace_settings").select("display_name").maybeSingle(),
@@ -126,13 +127,15 @@ export async function createDocument(
   contentJson: JSONContent,
   plainText: string,
   projectId: string | null = null,
+  sortOrder = 0,
 ): Promise<NoteDocument> {
   const ownerId = requireUserId(userId);
   if (!supabase) {
     const timestamp = now();
     const document: NoteDocument = {
       id: randomId(), owner_id: ownerId, title, content_json: contentJson, plain_text: plainText,
-      revision: 1, created_at: timestamp, updated_at: timestamp, deleted_at: null, project_id: projectId,
+      revision: 1, created_at: timestamp, updated_at: timestamp, deleted_at: null,
+      project_id: projectId, sort_order: sortOrder,
     };
     const data = readLocal();
     data.documents.unshift(document);
@@ -146,9 +149,33 @@ export async function createDocument(
     content_json: contentJson,
     plain_text: plainText,
     project_id: projectId,
+    sort_order: sortOrder,
   }).select().single();
   if (error) throw error;
   return data as NoteDocument;
+}
+
+export async function updateDocumentLayout(
+  userId: string | null | undefined,
+  layout: Array<Pick<NoteDocument, "id" | "project_id" | "sort_order">>,
+): Promise<void> {
+  requireUserId(userId);
+  if (!supabase) {
+    const data = readLocal();
+    const positions = new Map(layout.map((item) => [item.id, item]));
+    data.documents = data.documents.map((document) => {
+      const position = positions.get(document.id);
+      return position ? { ...document, project_id: position.project_id, sort_order: position.sort_order, updated_at: now() } : document;
+    });
+    writeLocal(data);
+    return;
+  }
+  const client = supabase;
+  const results = await Promise.all(layout.map((item) => client.from("documents")
+    .update({ project_id: item.project_id, sort_order: item.sort_order })
+    .eq("id", item.id)));
+  const failed = results.find((result) => result.error)?.error;
+  if (failed) throw failed;
 }
 
 export async function createProject(

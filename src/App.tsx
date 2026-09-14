@@ -52,6 +52,7 @@ import {
   saveDisplayName,
   setCommentStatus,
   updateDocument,
+  updateDocumentLayout,
 } from "./lib/repository";
 import {
   getSession,
@@ -71,7 +72,7 @@ import type {
   WorkspaceData,
 } from "./types";
 
-type DocumentUpdates = Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "project_id">>;
+type DocumentUpdates = Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "project_id" | "sort_order">>;
 type SaveState = "saved" | "pending" | "saving" | "error";
 type Selection = { from: number; to: number; quote: string } | null;
 
@@ -502,8 +503,9 @@ export default function App() {
 
   async function handleNewDocument(projectId: string | null = null) {
     try {
-      const note = await createDocument(userId, "Untitled note", blankContent, "", projectId);
-      setDocuments((current) => [note, ...current]);
+      const sortOrder = documentsRef.current.filter((document) => document.project_id === projectId).length;
+      const note = await createDocument(userId, "Untitled note", blankContent, "", projectId, sortOrder);
+      setDocuments((current) => [...current, note]);
       setActiveId(note.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to create a note.");
@@ -532,17 +534,43 @@ export default function App() {
     }
   }
 
-  async function moveDocumentToProject(documentId: string, projectId: string | null) {
-    const existing = documentsRef.current.find((document) => document.id === documentId);
-    if (!existing || existing.project_id === projectId) return;
-    applyLocalDocumentUpdate(documentId, { project_id: projectId });
+  async function arrangeDocument(documentId: string, projectId: string | null, beforeDocumentId: string | null = null) {
+    const original = documentsRef.current;
+    const moving = original.find((document) => document.id === documentId);
+    if (!moving || beforeDocumentId === documentId) return;
+
+    const withoutMoving = original.filter((document) => document.id !== documentId);
+    const targetGroup = withoutMoving
+      .filter((document) => document.project_id === projectId)
+      .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0));
+    const insertAt = beforeDocumentId
+      ? Math.max(0, targetGroup.findIndex((document) => document.id === beforeDocumentId))
+      : targetGroup.length;
+    targetGroup.splice(insertAt, 0, { ...moving, project_id: projectId });
+
+    const changed = new Map<string, NoteDocument>();
+    targetGroup.forEach((document, index) => changed.set(document.id, { ...document, project_id: projectId, sort_order: index }));
+    if (moving.project_id !== projectId) {
+      withoutMoving
+        .filter((document) => document.project_id === moving.project_id)
+        .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0))
+        .forEach((document, index) => changed.set(document.id, { ...document, sort_order: index }));
+    }
+
+    const next = original
+      .map((document) => changed.get(document.id) ?? document)
+      .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0));
+    documentsRef.current = next;
+    setDocuments(next);
+    setSaveState("saving");
     try {
-      const saved = await updateDocument(userId, documentId, { project_id: projectId });
-      clearDocumentDraft(documentId);
-      setDocuments((current) => current.map((item) => item.id === documentId ? saved : item));
+      await updateDocumentLayout(userId, [...changed.values()].map(({ id, project_id, sort_order }) => ({ id, project_id, sort_order })));
+      setSaveState(pendingUpdates.current.size ? "pending" : "saved");
     } catch (caught) {
-      applyLocalDocumentUpdate(documentId, { project_id: existing.project_id });
-      setError(caught instanceof Error ? caught.message : "Unable to move the note.");
+      documentsRef.current = original;
+      setDocuments(original);
+      setSaveState("error");
+      setError(caught instanceof Error ? caught.message : "Unable to arrange the note.");
     }
   }
 
@@ -685,8 +713,9 @@ export default function App() {
     },
     createDocument: async (title, content, format) => {
       const contentJson = inputToContent(content, format);
-      const note = await createDocument(userIdRef.current, title, contentJson, contentToPlainText(contentJson));
-      setDocuments((current) => [note, ...current]);
+      const sortOrder = documentsRef.current.filter((document) => !document.project_id).length;
+      const note = await createDocument(userIdRef.current, title, contentJson, contentToPlainText(contentJson), null, sortOrder);
+      setDocuments((current) => [...current, note]);
       setActiveId(note.id);
       return note;
     },
@@ -813,7 +842,7 @@ export default function App() {
                 className="project-group"
                 key={project.id}
                 onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
-                onDrop={(event) => { event.preventDefault(); void moveDocumentToProject(droppedDocumentId(event), project.id); }}
+                onDrop={(event) => { event.preventDefault(); void arrangeDocument(droppedDocumentId(event), project.id); }}
               >
                 <div className="project-heading">
                   <button type="button" className="project-title" title="Rename project" onClick={() => void handleRenameProject(project)}>
@@ -828,9 +857,11 @@ export default function App() {
                     className={`document-row project-document ${document.id === activeId ? "is-selected" : ""}`}
                     draggable
                     onDragStart={(event) => startDocumentDrag(event, document.id)}
+                    onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; }}
+                    onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), project.id, document.id); }}
                     key={document.id}
                   >
-                    <span className="drag-handle" draggable onDragStart={(event) => startDocumentDrag(event, document.id)} title="Drag note">
+                    <span className="drag-handle" title="Drag note">
                       <GripVertical size={13} />
                     </span>
                     <button type="button" onClick={() => setActiveId(document.id)}>{document.title}</button>
@@ -846,16 +877,18 @@ export default function App() {
           <p
             className="rail-label drop-target"
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
-            onDrop={(event) => { event.preventDefault(); void moveDocumentToProject(droppedDocumentId(event), null); }}
+            onDrop={(event) => { event.preventDefault(); void arrangeDocument(droppedDocumentId(event), null); }}
           >Notes</p>
           {ungroupedDocuments.map((document) => (
             <div
               className={`document-row ${document.id === activeId ? "is-selected" : ""}`}
               draggable
               onDragStart={(event) => startDocumentDrag(event, document.id)}
+              onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; }}
+              onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), null, document.id); }}
               key={document.id}
             >
-              <span className="drag-handle" draggable onDragStart={(event) => startDocumentDrag(event, document.id)} title="Drag note">
+              <span className="drag-handle" title="Drag note">
                 <GripVertical size={13} />
               </span>
               <button type="button" onClick={() => setActiveId(document.id)}>{document.title}</button>

@@ -13,6 +13,7 @@ export interface NoteDocument {
   updated_at: string;
   deleted_at: string | null;
   project_id: string | null;
+  sort_order: number;
 }
 
 export interface NoteProject {
