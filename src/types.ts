@@ -49,11 +49,26 @@ export interface CommentReply {
   created_at: string;
 }
 
+export interface CommentNotification {
+  id: string;
+  owner_id: string;
+  comment_id: string;
+  source_reply_id: string | null;
+  recipient_handle: string;
+  read_at: string | null;
+  acknowledged_at: string | null;
+  completed_at: string | null;
+  plan_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkspaceData {
   projects: NoteProject[];
   documents: NoteDocument[];
   comments: CommentThread[];
   replies: CommentReply[];
+  notifications: CommentNotification[];
   displayName: string;
 }
 
@@ -66,4 +81,5 @@ export interface WorkspaceBackup {
   documents: NoteDocument[];
   comments: CommentThread[];
   replies: CommentReply[];
+  notifications?: CommentNotification[];
 }

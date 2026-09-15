@@ -4,6 +4,7 @@ import type { Editor, JSONContent } from "@tiptap/core";
 import type { Session } from "@supabase/supabase-js";
 import {
   Bold,
+  Bell,
   Braces,
   Check,
   CheckSquare,
@@ -35,6 +36,7 @@ import {
   inputToContent,
   welcomeMarkdown,
 } from "./lib/editor";
+import { nextTopSortOrder } from "./lib/documents";
 import {
   clearDocumentDraft,
   createBackup,
@@ -43,6 +45,7 @@ import {
   createProject,
   getDocumentDrafts,
   loadWorkspace,
+  markNotificationsRead,
   needsDailyBackup,
   replyToComment,
   restoreBackup,
@@ -53,6 +56,7 @@ import {
   setCommentStatus,
   updateDocument,
   updateDocumentLayout,
+  updateNotification,
 } from "./lib/repository";
 import {
   getSession,
@@ -63,6 +67,7 @@ import {
 } from "./lib/supabase";
 import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
 import type {
+  CommentNotification,
   CommentReply,
   CommentStatus,
   CommentThread,
@@ -190,6 +195,7 @@ export default function App() {
   const [projects, setProjects] = useState<NoteProject[]>([]);
   const [comments, setComments] = useState<CommentThread[]>([]);
   const [replies, setReplies] = useState<CommentReply[]>([]);
+  const [notifications, setNotifications] = useState<CommentNotification[]>([]);
   const [displayName, setDisplayName] = useState("You");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -198,6 +204,8 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [commentFilter, setCommentFilter] = useState<"open" | "all">("open");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
@@ -210,6 +218,7 @@ export default function App() {
   const projectsRef = useRef(projects);
   const commentsRef = useRef(comments);
   const repliesRef = useRef(replies);
+  const notificationsRef = useRef(notifications);
   const activeIdRef = useRef(activeId);
   const displayNameRef = useRef(displayName);
   const userIdRef = useRef(userId);
@@ -217,11 +226,13 @@ export default function App() {
   const refreshing = useRef(false);
   const pendingUpdates = useRef(new Map<string, DocumentUpdates>());
   const editorDocumentId = useRef<string | null>(null);
+  const commentCardRefs = useRef(new Map<string, HTMLElement>());
 
   useEffect(() => { documentsRef.current = documents; }, [documents]);
   useEffect(() => { projectsRef.current = projects; }, [projects]);
   useEffect(() => { commentsRef.current = comments; }, [comments]);
   useEffect(() => { repliesRef.current = replies; }, [replies]);
+  useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   useEffect(() => { displayNameRef.current = displayName; }, [displayName]);
   useEffect(() => { userIdRef.current = userId; }, [userId]);
@@ -239,10 +250,11 @@ export default function App() {
         "aria-label": "Document body",
       },
       handleClick: (_view, _position, event) => {
-        if ((event.target as HTMLElement).closest(".comment-anchor")) {
-          setCommentsOpen(true);
-          return true;
-        }
+        const anchor = event.target instanceof Element
+          ? event.target.closest<HTMLElement>(".comment-anchor")
+          : null;
+        const commentId = anchor?.dataset.commentId;
+        if (commentId) return openCommentThread(commentId);
         return false;
       },
     },
@@ -260,6 +272,7 @@ export default function App() {
     documents: documentsRef.current,
     comments: commentsRef.current,
     replies: repliesRef.current,
+    notifications: notificationsRef.current,
     displayName: displayNameRef.current,
   }), []);
 
@@ -296,6 +309,7 @@ export default function App() {
       setProjects(data.projects);
       setComments(data.comments);
       setReplies(data.replies);
+      setNotifications(data.notifications);
       setDisplayName(data.displayName);
       setActiveId((current) => current && data.documents.some((item) => item.id === current)
         ? current
@@ -348,6 +362,7 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "documents", filter: `owner_id=eq.${userId}` }, scheduleRefresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "comments", filter: `owner_id=eq.${userId}` }, scheduleRefresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "comment_replies", filter: `owner_id=eq.${userId}` }, scheduleRefresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "comment_notifications", filter: `owner_id=eq.${userId}` }, scheduleRefresh)
       .subscribe();
     return () => {
       if (refreshTimer) window.clearTimeout(refreshTimer);
@@ -399,6 +414,29 @@ export default function App() {
       });
     if (transaction.docChanged) editor.view.dispatch(transaction.setMeta("addToHistory", false));
   }, [editor, activeId, comments]);
+
+  useEffect(() => {
+    if (!focusedCommentId) return;
+    const thread = comments.find((comment) => comment.id === focusedCommentId);
+    if (!thread || thread.document_id !== activeId) setFocusedCommentId(null);
+  }, [activeId, comments, focusedCommentId]);
+
+  useEffect(() => {
+    if (!commentsOpen || !focusedCommentId) return;
+    const thread = comments.find((comment) => comment.id === focusedCommentId);
+    if (!thread || thread.document_id !== activeId) return;
+    if (commentFilter === "open" && thread.status !== "open") {
+      setCommentFilter("all");
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const card = commentCardRefs.current.get(focusedCommentId);
+      if (!card) return;
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeId, commentFilter, comments, commentsOpen, focusedCommentId]);
 
   const flushPendingSave = useCallback(async () => {
     const entries = [...pendingUpdates.current.entries()];
@@ -503,9 +541,11 @@ export default function App() {
 
   async function handleNewDocument(projectId: string | null = null) {
     try {
-      const sortOrder = documentsRef.current.filter((document) => document.project_id === projectId).length;
+      const sortOrder = nextTopSortOrder(documentsRef.current, projectId);
       const note = await createDocument(userId, "Untitled note", blankContent, "", projectId, sortOrder);
-      setDocuments((current) => [...current, note]);
+      const next = [note, ...documentsRef.current];
+      documentsRef.current = next;
+      setDocuments(next);
       setActiveId(note.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to create a note.");
@@ -687,6 +727,47 @@ export default function App() {
     }
   }
 
+  async function openNotification(notification: CommentNotification) {
+    const thread = commentsRef.current.find((comment) => comment.id === notification.comment_id);
+    if (!thread) return;
+    openCommentThread(thread.id);
+    if (notification.read_at) return;
+    try {
+      const [updated] = await markNotificationsRead(userIdRef.current, [notification.id]);
+      if (updated) {
+        setNotifications((current) => current.map((item) => item.id === updated.id ? updated : item));
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to mark the notification as read.");
+    }
+  }
+
+  function openCommentThread(commentId: string): boolean {
+    const thread = commentsRef.current.find((comment) => comment.id === commentId);
+    if (!thread) return false;
+    setActiveId(thread.document_id);
+    setCommentsOpen(true);
+    setCommenting(false);
+    setNotificationsOpen(false);
+    if (thread.status !== "open") setCommentFilter("all");
+    setFocusedCommentId(commentId);
+    return true;
+  }
+
+  async function markAllToddNotificationsRead() {
+    const ids = notificationsRef.current
+      .filter((notification) => notification.recipient_handle === "todd" && !notification.read_at)
+      .map((notification) => notification.id);
+    if (!ids.length) return;
+    try {
+      const updated = await markNotificationsRead(userIdRef.current, ids);
+      const updatedById = new Map(updated.map((notification) => [notification.id, notification]));
+      setNotifications((current) => current.map((item) => updatedById.get(item.id) ?? item));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to mark notifications as read.");
+    }
+  }
+
   const webMcpApiRef = useRef<WebMcpApi | null>(null);
   webMcpApiRef.current = {
     listDocuments: async (search, limit = 50) => {
@@ -713,9 +794,11 @@ export default function App() {
     },
     createDocument: async (title, content, format) => {
       const contentJson = inputToContent(content, format);
-      const sortOrder = documentsRef.current.filter((document) => !document.project_id).length;
+      const sortOrder = nextTopSortOrder(documentsRef.current, null);
       const note = await createDocument(userIdRef.current, title, contentJson, contentToPlainText(contentJson), null, sortOrder);
-      setDocuments((current) => [...current, note]);
+      const next = [note, ...documentsRef.current];
+      documentsRef.current = next;
+      setDocuments(next);
       setActiveId(note.id);
       return note;
     },
@@ -776,6 +859,48 @@ export default function App() {
       setComments((current) => current.map((item) => item.id === commentId ? updated : item));
       return updated;
     },
+    listNotifications: async (recipient = "gpt", state = "pending") => notificationsRef.current
+      .filter((notification) => notification.recipient_handle === recipient.toLowerCase())
+      .filter((notification) => state === "all"
+        || (state === "unread" && !notification.read_at)
+        || (state === "pending" && !notification.acknowledged_at && !notification.completed_at)
+        || (state === "planned" && Boolean(notification.acknowledged_at) && !notification.completed_at)
+        || (state === "completed" && Boolean(notification.completed_at)))
+      .map((notification) => {
+        const thread = commentsRef.current.find((comment) => comment.id === notification.comment_id);
+        const sourceReply = notification.source_reply_id
+          ? repliesRef.current.find((reply) => reply.id === notification.source_reply_id)
+          : null;
+        const document = thread
+          ? documentsRef.current.find((item) => item.id === thread.document_id)
+          : null;
+        return {
+          ...notification,
+          source: sourceReply ?? thread ?? null,
+          document: document ? { id: document.id, title: document.title } : null,
+          thread,
+          replies: repliesRef.current.filter((reply) => reply.comment_id === notification.comment_id),
+        };
+      }),
+    acknowledgeNotification: async (notificationId, planId) => {
+      const timestamp = new Date().toISOString();
+      const updated = await updateNotification(userIdRef.current, notificationId, {
+        read_at: timestamp,
+        acknowledged_at: timestamp,
+        plan_id: planId,
+      });
+      setNotifications((current) => current.map((item) => item.id === updated.id ? updated : item));
+      return updated;
+    },
+    completeNotification: async (notificationId) => {
+      const timestamp = new Date().toISOString();
+      const updated = await updateNotification(userIdRef.current, notificationId, {
+        read_at: timestamp,
+        completed_at: timestamp,
+      });
+      setNotifications((current) => current.map((item) => item.id === updated.id ? updated : item));
+      return updated;
+    },
   };
 
   useEffect(() => {
@@ -790,6 +915,9 @@ export default function App() {
       addComment: (...args) => webMcpApiRef.current!.addComment(...args),
       replyToComment: (...args) => webMcpApiRef.current!.replyToComment(...args),
       setCommentStatus: (...args) => webMcpApiRef.current!.setCommentStatus(...args),
+      listNotifications: (...args) => webMcpApiRef.current!.listNotifications(...args),
+      acknowledgeNotification: (...args) => webMcpApiRef.current!.acknowledgeNotification(...args),
+      completeNotification: (...args) => webMcpApiRef.current!.completeNotification(...args),
     });
   }, []);
 
@@ -802,6 +930,8 @@ export default function App() {
     comment.document_id === activeId && (commentFilter === "all" || comment.status === "open"));
   const totalThreads = comments.filter((comment) => comment.document_id === activeId).length;
   const openThreads = comments.filter((comment) => comment.document_id === activeId && comment.status === "open").length;
+  const toddNotifications = notifications.filter((notification) => notification.recipient_handle === "todd");
+  const unreadNotifications = toddNotifications.filter((notification) => !notification.read_at).length;
 
   if (isSupabaseConfigured && session === undefined) {
     return <main className="loading-page">Opening your workspace…</main>;
@@ -921,12 +1051,61 @@ export default function App() {
                     ? "Cloud sync paused"
                     : isSupabaseConfigured ? "Saved to Supabase" : "Saved on this device"}
             </button>
+            <div className="notification-menu">
+              <button
+                type="button"
+                className={`header-button notification-button ${notificationsOpen ? "is-active" : ""}`}
+                aria-expanded={notificationsOpen}
+                onClick={() => setNotificationsOpen((value) => !value)}
+              >
+                <Bell size={18} /> Mentions
+                {unreadNotifications > 0 && <span className="count-badge">{unreadNotifications}</span>}
+              </button>
+              {notificationsOpen && (
+                <section className="notification-popover" aria-label="Mention notifications">
+                  <div className="notification-heading">
+                    <div><strong>Mentions</strong><span>@todd</span></div>
+                    <button type="button" disabled={!unreadNotifications} onClick={() => void markAllToddNotificationsRead()}>
+                      Mark all read
+                    </button>
+                  </div>
+                  <div className="notification-list">
+                    {toddNotifications.map((notification) => {
+                      const thread = comments.find((comment) => comment.id === notification.comment_id);
+                      const sourceReply = notification.source_reply_id
+                        ? replies.find((reply) => reply.id === notification.source_reply_id)
+                        : null;
+                      const document = thread ? documents.find((item) => item.id === thread.document_id) : null;
+                      const source = sourceReply ?? thread;
+                      return (
+                        <button
+                          type="button"
+                          className={`notification-item ${notification.read_at ? "is-read" : "is-unread"}`}
+                          key={notification.id}
+                          onClick={() => void openNotification(notification)}
+                        >
+                          <span className="notification-dot" />
+                          <span className="notification-copy">
+                            <span><strong>{source?.author_name ?? "Unknown"}</strong> mentioned you in {document?.title ?? "a note"}</span>
+                            <span>{source?.body ?? "The source comment is no longer available."}</span>
+                            <time>{new Date(notification.created_at).toLocaleString()}</time>
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {!toddNotifications.length && (
+                      <p className="notification-empty">No @todd mentions yet.</p>
+                    )}
+                  </div>
+                </section>
+              )}
+            </div>
             {selection && (
-              <button type="button" className="comment-selection-button" onClick={() => { setCommentsOpen(true); setCommenting(true); }}>
+              <button type="button" className="comment-selection-button" onClick={() => { setFocusedCommentId(null); setCommentsOpen(true); setCommenting(true); }}>
                 <MessageCirclePlus size={17} /> Comment
               </button>
             )}
-            <button type="button" className="header-button" onClick={() => setCommentsOpen((value) => !value)}>
+            <button type="button" className="header-button" onClick={() => { setFocusedCommentId(null); setCommentsOpen((value) => !value); }}>
               <MessageCircle size={18} /> Comments {openThreads > 0 && <span className="count-badge">{openThreads}</span>}
             </button>
             <IconButton label="Workspace settings" onClick={() => setSettingsOpen(true)}><Ellipsis size={19} /></IconButton>
@@ -1002,7 +1181,7 @@ export default function App() {
               <button className={commentFilter === "open" ? "active" : ""} onClick={() => setCommentFilter("open")}>Open</button>
               <button className={commentFilter === "all" ? "active" : ""} onClick={() => setCommentFilter("all")}>All</button>
             </div>
-            <IconButton label="Close comments" onClick={() => setCommentsOpen(false)}><X size={17} /></IconButton>
+            <IconButton label="Close comments" onClick={() => { setCommentsOpen(false); setFocusedCommentId(null); }}><X size={17} /></IconButton>
           </div>
 
           {commenting && selection && (
@@ -1018,7 +1197,16 @@ export default function App() {
 
           <div className="comment-list">
             {activeComments.map((comment) => (
-              <article className={`comment-card ${comment.status}`} key={comment.id}>
+              <article
+                className={`comment-card ${comment.status} ${comment.id === focusedCommentId ? "is-focused" : ""}`}
+                data-comment-id={comment.id}
+                key={comment.id}
+                ref={(element) => {
+                  if (element) commentCardRefs.current.set(comment.id, element);
+                  else commentCardRefs.current.delete(comment.id);
+                }}
+                tabIndex={-1}
+              >
                 <blockquote>{comment.detached && <span className="detached-label">Detached · </span>}“{comment.exact_quote}”</blockquote>
                 <div className="comment-meta"><strong>{comment.author_name}</strong><span>{new Date(comment.created_at).toLocaleString()}</span></div>
                 <p>{comment.body}</p>

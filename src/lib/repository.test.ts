@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearDocumentDraft,
   createBackup,
+  createComment,
   createDocument,
   loadWorkspace,
+  markNotificationsRead,
+  replyToComment,
   saveDocumentDraft,
   updateDocument,
   updateDocumentLayout,
+  updateNotification,
 } from "./repository";
 
 vi.mock("./supabase", () => ({ supabase: null }));
@@ -25,7 +29,7 @@ describe("local workspace repository", () => {
   });
 
   it("exports a complete, versioned workspace snapshot", () => {
-    const backup = createBackup({ projects: [], documents: [], comments: [], replies: [], displayName: "Todd" });
+    const backup = createBackup({ projects: [], documents: [], comments: [], replies: [], notifications: [], displayName: "Todd" });
 
     expect(backup).toMatchObject({
       format: "margin-workspace",
@@ -73,5 +77,44 @@ describe("local workspace repository", () => {
 
     clearDocumentDraft(created.id);
     expect((await loadWorkspace(null)).documents[0].title).toBe("Draft");
+  });
+
+  it("queues one notification per mentioned handle and tracks its lifecycle", async () => {
+    const comment = await createComment(null, {
+      document_id: "document-1",
+      body: "Please have @GPT review this with @gpt, then tell @todd.",
+      exact_quote: "review this",
+    });
+    const workspace = await loadWorkspace(null);
+
+    expect(workspace.notifications).toHaveLength(2);
+    expect(workspace.notifications.map((notification) => notification.recipient_handle).sort())
+      .toEqual(["gpt", "todd"]);
+
+    const gptNotification = workspace.notifications.find((notification) => notification.recipient_handle === "gpt")!;
+    const acknowledged = await updateNotification(null, gptNotification.id, {
+      acknowledged_at: new Date().toISOString(),
+      plan_id: "plan-1",
+    });
+    expect(acknowledged).toMatchObject({ comment_id: comment.id, plan_id: "plan-1" });
+
+    const [read] = await markNotificationsRead(null, [gptNotification.id]);
+    expect(read.read_at).not.toBeNull();
+  });
+
+  it("queues reply mentions against the original comment", async () => {
+    const comment = await createComment(null, {
+      document_id: "document-1",
+      body: "Initial request",
+      exact_quote: "request",
+    });
+    const reply = await replyToComment(null, comment.id, "Done, @todd.");
+    const [notification] = (await loadWorkspace(null)).notifications;
+
+    expect(notification).toMatchObject({
+      comment_id: comment.id,
+      source_reply_id: reply.id,
+      recipient_handle: "todd",
+    });
   });
 });

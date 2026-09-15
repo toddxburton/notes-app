@@ -1,6 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import { supabase } from "./supabase";
 import type {
+  CommentNotification,
   CommentReply,
   CommentStatus,
   CommentThread,
@@ -24,7 +25,34 @@ function now() {
 }
 
 function localEmpty(): WorkspaceData {
-  return { projects: [], documents: [], comments: [], replies: [], displayName: "You" };
+  return { projects: [], documents: [], comments: [], replies: [], notifications: [], displayName: "You" };
+}
+
+function mentionedHandles(body: string): string[] {
+  return [...body.matchAll(/(?:^|[^a-z0-9_])@([a-z0-9_]{1,40})/gi)]
+    .map((match) => match[1].toLowerCase())
+    .filter((handle, index, handles) => handles.indexOf(handle) === index);
+}
+
+function appendLocalNotifications(
+  data: WorkspaceData,
+  source: { ownerId: string; commentId: string; replyId?: string; body: string; createdAt: string },
+): void {
+  for (const recipientHandle of mentionedHandles(source.body)) {
+    data.notifications.push({
+      id: randomId(),
+      owner_id: source.ownerId,
+      comment_id: source.commentId,
+      source_reply_id: source.replyId ?? null,
+      recipient_handle: recipientHandle,
+      read_at: null,
+      acknowledged_at: null,
+      completed_at: null,
+      plan_id: null,
+      created_at: source.createdAt,
+      updated_at: source.createdAt,
+    });
+  }
 }
 
 function readLocal(): WorkspaceData {
@@ -100,16 +128,18 @@ export async function loadWorkspace(userId?: string | null): Promise<WorkspaceDa
   }
   requireUserId(userId);
 
-  const [projectsResult, documentsResult, commentsResult, repliesResult, settingsResult] = await Promise.all([
+  const [projectsResult, documentsResult, commentsResult, repliesResult, notificationsResult, settingsResult] = await Promise.all([
     supabase.from("projects").select("*").order("created_at", { ascending: true }),
     supabase.from("documents").select("*").is("deleted_at", null)
       .order("sort_order", { ascending: true }).order("updated_at", { ascending: false }),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
     supabase.from("comment_replies").select("*").order("created_at", { ascending: true }),
+    supabase.from("comment_notifications").select("*").order("created_at", { ascending: false }),
     supabase.from("workspace_settings").select("display_name").maybeSingle(),
   ]);
 
-  const error = projectsResult.error ?? documentsResult.error ?? commentsResult.error ?? repliesResult.error ?? settingsResult.error;
+  const error = projectsResult.error ?? documentsResult.error ?? commentsResult.error ?? repliesResult.error
+    ?? notificationsResult.error ?? settingsResult.error;
   if (error) throw error;
 
   return {
@@ -117,6 +147,7 @@ export async function loadWorkspace(userId?: string | null): Promise<WorkspaceDa
     documents: overlayDrafts((documentsResult.data ?? []) as NoteDocument[], requireUserId(userId)),
     comments: (commentsResult.data ?? []) as CommentThread[],
     replies: (repliesResult.data ?? []) as CommentReply[],
+    notifications: (notificationsResult.data ?? []) as CommentNotification[],
     displayName: settingsResult.data?.display_name ?? "You",
   };
 }
@@ -262,6 +293,12 @@ export async function createComment(
   if (!supabase) {
     const data = readLocal();
     data.comments.push(comment);
+    appendLocalNotifications(data, {
+      ownerId,
+      commentId: comment.id,
+      body: comment.body,
+      createdAt: comment.created_at,
+    });
     writeLocal(data);
     return comment;
   }
@@ -286,6 +323,13 @@ export async function replyToComment(
   if (!supabase) {
     const data = readLocal();
     data.replies.push(reply);
+    appendLocalNotifications(data, {
+      ownerId,
+      commentId,
+      replyId: reply.id,
+      body: reply.body,
+      createdAt: reply.created_at,
+    });
     writeLocal(data);
     return reply;
   }
@@ -320,6 +364,55 @@ export async function setCommentStatus(
   return data as CommentThread;
 }
 
+export async function updateNotification(
+  userId: string | null | undefined,
+  notificationId: string,
+  updates: Partial<Pick<CommentNotification, "read_at" | "acknowledged_at" | "completed_at" | "plan_id">>,
+): Promise<CommentNotification> {
+  requireUserId(userId);
+  if (!supabase) {
+    const data = readLocal();
+    const index = data.notifications.findIndex((notification) => notification.id === notificationId);
+    if (index < 0) throw new Error("Notification not found.");
+    data.notifications[index] = { ...data.notifications[index], ...updates, updated_at: now() };
+    writeLocal(data);
+    return data.notifications[index];
+  }
+
+  const { data, error } = await supabase.from("comment_notifications")
+    .update(updates)
+    .eq("id", notificationId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data as CommentNotification;
+}
+
+export async function markNotificationsRead(
+  userId: string | null | undefined,
+  notificationIds: string[],
+): Promise<CommentNotification[]> {
+  requireUserId(userId);
+  if (!notificationIds.length) return [];
+  const readAt = now();
+  if (!supabase) {
+    const data = readLocal();
+    const idSet = new Set(notificationIds);
+    data.notifications = data.notifications.map((notification) => idSet.has(notification.id)
+      ? { ...notification, read_at: notification.read_at ?? readAt, updated_at: readAt }
+      : notification);
+    writeLocal(data);
+    return data.notifications.filter((notification) => idSet.has(notification.id));
+  }
+
+  const { data, error } = await supabase.from("comment_notifications")
+    .update({ read_at: readAt })
+    .in("id", notificationIds)
+    .select();
+  if (error) throw error;
+  return (data ?? []) as CommentNotification[];
+}
+
 export async function saveDisplayName(userId: string | null | undefined, displayName: string): Promise<void> {
   const ownerId = requireUserId(userId);
   if (!supabase) {
@@ -346,6 +439,7 @@ export function createBackup(data: WorkspaceData): WorkspaceBackup {
     documents: data.documents,
     comments: data.comments,
     replies: data.replies,
+    notifications: data.notifications,
   };
 }
 
@@ -390,6 +484,7 @@ export async function restoreBackup(
       documents: backup.documents.map((item) => ({ ...item, owner_id: ownerId })),
       comments: backup.comments.map((item) => ({ ...item, owner_id: ownerId })),
       replies: backup.replies.map((item) => ({ ...item, owner_id: ownerId })),
+      notifications: (backup.notifications ?? []).map((item) => ({ ...item, owner_id: ownerId })),
       displayName: backup.display_name,
     });
     return;

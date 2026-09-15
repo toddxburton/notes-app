@@ -1,0 +1,3 @@
+[mcp_servers.notes]
+url = "https://notes.toddxburton.com/mcp"
+bearer_token_env_var = "NOTES_MCP_TOKEN"

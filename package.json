@@ -5,14 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "worker:types": "wrangler types",
+    "build": "npm run worker:types && tsc -b && vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
     "deploy:dry": "npm run build && wrangler deploy --dry-run",
-    "typecheck": "tsc -b",
+    "typecheck": "npm run worker:types && tsc -b",
     "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "@supabase/supabase-js": "2.116.0",
     "@tiptap/core": "3.31.3",
     "@tiptap/extension-link": "3.31.3",
@@ -22,11 +24,13 @@
     "@tiptap/html": "3.31.3",
     "@tiptap/react": "3.31.3",
     "@tiptap/starter-kit": "3.31.3",
+    "agents": "0.23.0",
     "dompurify": "3.4.15",
     "lucide-react": "1.45.0",
     "marked": "18.0.13",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/react": "19.3.0",

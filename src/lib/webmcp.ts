@@ -14,6 +14,9 @@ export interface WebMcpApi {
   addComment: (input: Record<string, unknown>) => Promise<unknown>;
   replyToComment: (commentId: string, body: string, agentName?: string) => Promise<unknown>;
   setCommentStatus: (commentId: string, status: "open" | "resolved") => Promise<unknown>;
+  listNotifications: (recipient?: string, state?: "unread" | "pending" | "planned" | "completed" | "all") => Promise<unknown>;
+  acknowledgeNotification: (notificationId: string, planId: string) => Promise<unknown>;
+  completeNotification: (notificationId: string) => Promise<unknown>;
 }
 
 function text(input: Record<string, unknown>, key: string, fallback = "") {
@@ -128,6 +131,38 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
       inputSchema: { type: "object", properties: { comment_id: { type: "string" } }, required: ["comment_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.setCommentStatus(text(input, "comment_id"), "open"),
+    }),
+    register({
+      name: "list_notifications",
+      description: "List durable @mention notifications with source comment and reply context. Defaults to pending @gpt mentions.",
+      inputSchema: { type: "object", properties: {
+        recipient: { type: "string", pattern: "^[a-z0-9_]{1,40}$", default: "gpt" },
+        state: { type: "string", enum: ["unread", "pending", "planned", "completed", "all"], default: "pending" },
+      }, additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input) => api.listNotifications(
+        text(input, "recipient", "gpt"),
+        text(input, "state", "pending") as "unread" | "pending" | "planned" | "completed" | "all",
+      ),
+    }),
+    register({
+      name: "acknowledge_notification",
+      description: "Mark an @mention as read and added to a specific plan. Reply to the source comment separately so the person is notified.",
+      inputSchema: { type: "object", properties: {
+        notification_id: { type: "string", minLength: 1 },
+        plan_id: { type: "string", minLength: 1, maxLength: 80 },
+      }, required: ["notification_id", "plan_id"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.acknowledgeNotification(text(input, "notification_id"), text(input, "plan_id")),
+    }),
+    register({
+      name: "complete_notification",
+      description: "Mark a planned @mention as completed after the requested work and @todd completion reply are both finished.",
+      inputSchema: { type: "object", properties: {
+        notification_id: { type: "string", minLength: 1 },
+      }, required: ["notification_id"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.completeNotification(text(input, "notification_id")),
     }),
   ]);
   return true;

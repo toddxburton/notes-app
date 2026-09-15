@@ -22,15 +22,21 @@ describe("WebMCP registration", () => {
       addComment: noop,
       replyToComment: noop,
       setCommentStatus: noop,
+      listNotifications: noop,
+      acknowledgeNotification: noop,
+      completeNotification: noop,
     };
 
     expect(await registerWebMcpTools(api)).toBe(true);
     expect(tools.map((tool) => tool.name).sort()).toEqual([
+      "acknowledge_notification",
       "add_comment",
+      "complete_notification",
       "create_document",
       "get_document",
       "list_comments",
       "list_documents",
+      "list_notifications",
       "open_document",
       "reopen_comment",
       "reply_to_comment",

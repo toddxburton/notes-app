@@ -185,6 +185,37 @@ input, textarea, [contenteditable="true"] { caret-color: #171716; }
 
 .document-breadcrumb { font-size: 11px; color: #aaa9a4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
+.notification-menu { position: relative; }
+.notification-button.is-active { color: var(--purple); }
+.notification-popover {
+  position: absolute;
+  top: 39px;
+  right: 0;
+  z-index: 30;
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 90px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 55px rgba(0,0,0,.16);
+}
+.notification-heading { min-height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 10px 13px 10px 16px; border-bottom: 1px solid var(--border); }
+.notification-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.notification-heading strong { font-size: 12px; }
+.notification-heading span { color: var(--muted); font-size: 9px; }
+.notification-heading button { border: 0; background: transparent; color: var(--purple); font-size: 10px; cursor: pointer; }
+.notification-heading button:disabled { color: #bbb; cursor: default; }
+.notification-list { max-height: 500px; overflow: auto; padding: 6px; }
+.notification-item { width: 100%; display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 8px; border: 0; border-radius: 7px; background: transparent; padding: 10px; text-align: left; cursor: pointer; }
+.notification-item:hover { background: var(--soft); }
+.notification-item.is-read { opacity: .68; }
+.notification-dot { width: 6px; height: 6px; margin-top: 5px; border-radius: 999px; background: transparent; }
+.notification-item.is-unread .notification-dot { background: var(--purple); }
+.notification-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: #555550; font-size: 10px; line-height: 1.4; }
+.notification-copy > span:nth-child(2) { color: #282826; font-size: 11px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.notification-copy time { color: #aaa; font-size: 9px; }
+.notification-empty { margin: 28px 12px; color: var(--muted); text-align: center; font-size: 11px; }
 .save-indicator { color: #92928c; font-size: 10px; }
 .save-indicator.saving .connection-dot { animation: pulse 1s infinite; }
 .save-indicator.pending { color: var(--cobalt); }
@@ -302,6 +333,8 @@ input, textarea, [contenteditable="true"] { caret-color: #171716; }
 .comments-empty p { margin: 0; font-size: 10px; line-height: 1.5; }
 
 .comment-composer, .comment-card { margin: 10px 14px; border: 1px solid var(--border); border-radius: 9px; background: #fff; padding: 13px; }
+.comment-card { scroll-margin-block: 16px; transition: border-color .15s ease, box-shadow .15s ease; }
+.comment-card.is-focused { border-color: #aaa3ee; box-shadow: 0 0 0 3px #efedff; outline: none; }
 .comment-composer blockquote, .comment-card > blockquote { margin: 0 0 12px; padding: 8px 10px; background: #f7f6f0; border-left: 2px solid #d4bf5b; color: #666058; font-size: 11px; line-height: 1.45; }
 .comment-composer textarea, .reply-input { width: 100%; resize: vertical; min-height: 68px; border: 1px solid #dededb; border-radius: 6px; padding: 9px; outline: 0; font-size: 12px; }
 .comment-composer textarea:focus, .reply-input:focus { border-color: #ada7e8; box-shadow: 0 0 0 2px #efedff; }

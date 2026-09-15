@@ -1,0 +1,4 @@
+# Server-only values for `wrangler dev`. Never expose these with a VITE_ prefix.
+SUPABASE_SECRET_KEY=sb_secret_your_dedicated_worker_key
+NOTES_MCP_TOKEN=replace_with_a_cryptographically_random_token
+NOTES_OWNER_ID=replace_with_your_supabase_auth_user_uuid
