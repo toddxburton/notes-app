@@ -13,6 +13,7 @@ function document(projectId: string | null, sortOrder: number): NoteDocument {
     created_at: "2026-09-14T00:00:00.000Z",
     updated_at: "2026-09-14T00:00:00.000Z",
     deleted_at: null,
+    archived_at: null,
     project_id: projectId,
     sort_order: sortOrder,
   };

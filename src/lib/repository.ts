@@ -129,7 +129,7 @@ export async function loadWorkspace(userId?: string | null): Promise<WorkspaceDa
   requireUserId(userId);
 
   const [projectsResult, documentsResult, commentsResult, repliesResult, notificationsResult, settingsResult] = await Promise.all([
-    supabase.from("projects").select("*").order("created_at", { ascending: true }),
+    supabase.from("projects").select("*").order("sort_order", { ascending: true }).order("created_at", { ascending: true }),
     supabase.from("documents").select("*").is("deleted_at", null)
       .order("sort_order", { ascending: true }).order("updated_at", { ascending: false }),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
@@ -165,7 +165,7 @@ export async function createDocument(
     const timestamp = now();
     const document: NoteDocument = {
       id: randomId(), owner_id: ownerId, title, content_json: contentJson, plain_text: plainText,
-      revision: 1, created_at: timestamp, updated_at: timestamp, deleted_at: null,
+      revision: 1, created_at: timestamp, updated_at: timestamp, deleted_at: null, archived_at: null,
       project_id: projectId, sort_order: sortOrder,
     };
     const data = readLocal();
@@ -212,10 +212,14 @@ export async function updateDocumentLayout(
 export async function createProject(
   userId: string | null | undefined,
   name: string,
+  sortOrder = 0,
 ): Promise<NoteProject> {
   const ownerId = requireUserId(userId);
   const timestamp = now();
-  const project: NoteProject = { id: randomId(), owner_id: ownerId, name, created_at: timestamp, updated_at: timestamp };
+  const project: NoteProject = {
+    id: randomId(), owner_id: ownerId, name, sort_order: sortOrder,
+    collapsed: false, archived_at: null, created_at: timestamp, updated_at: timestamp,
+  };
   if (!supabase) {
     const data = readLocal();
     data.projects.push(project);
@@ -247,10 +251,51 @@ export async function renameProject(
   return data as NoteProject;
 }
 
+export async function updateProject(
+  userId: string | null | undefined,
+  projectId: string,
+  updates: Partial<Pick<NoteProject, "name" | "collapsed" | "archived_at" | "sort_order">>,
+): Promise<NoteProject> {
+  requireUserId(userId);
+  if (!supabase) {
+    const data = readLocal();
+    const index = data.projects.findIndex((project) => project.id === projectId);
+    if (index < 0) throw new Error("Project not found.");
+    data.projects[index] = { ...data.projects[index], ...updates, updated_at: now() };
+    writeLocal(data);
+    return data.projects[index];
+  }
+  const { data, error } = await supabase.from("projects").update(updates).eq("id", projectId).select().single();
+  if (error) throw error;
+  return data as NoteProject;
+}
+
+export async function updateProjectLayout(
+  userId: string | null | undefined,
+  layout: Array<Pick<NoteProject, "id" | "sort_order">>,
+): Promise<void> {
+  requireUserId(userId);
+  if (!supabase) {
+    const data = readLocal();
+    const positions = new Map(layout.map((item) => [item.id, item.sort_order]));
+    data.projects = data.projects.map((project) => {
+      const sortOrder = positions.get(project.id);
+      return sortOrder === undefined ? project : { ...project, sort_order: sortOrder, updated_at: now() };
+    });
+    writeLocal(data);
+    return;
+  }
+  const client = supabase;
+  const results = await Promise.all(layout.map((item) => client.from("projects")
+    .update({ sort_order: item.sort_order }).eq("id", item.id)));
+  const failed = results.find((result) => result.error)?.error;
+  if (failed) throw failed;
+}
+
 export async function updateDocument(
   userId: string | null | undefined,
   documentId: string,
-  updates: Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "project_id">>,
+  updates: Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "archived_at" | "project_id">>,
 ): Promise<NoteDocument> {
   requireUserId(userId);
   if (!supabase) {
@@ -475,7 +520,7 @@ export async function restoreBackup(
   backup: WorkspaceBackup,
 ): Promise<void> {
   if (backup.format !== "margin-workspace" || backup.version !== 1) {
-    throw new Error("This is not a supported Notes workspace backup.");
+    throw new Error("This is not a supported Noted workspace backup.");
   }
   const ownerId = requireUserId(userId);
   if (!supabase) {

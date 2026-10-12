@@ -91,7 +91,7 @@ export function inputToContent(
   return format === "plain_text" ? plainTextToContent(content) : markdownToContent(content);
 }
 
-export const welcomeMarkdown = `Notes is a quiet place for notes, drafts, and decisions.
+export const welcomeMarkdown = `Noted is a quiet place for notes, drafts, and decisions.
 
 ## Write together, without sending it away
 

@@ -12,6 +12,7 @@ export interface NoteDocument {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+  archived_at: string | null;
   project_id: string | null;
   sort_order: number;
 }
@@ -20,6 +21,9 @@ export interface NoteProject {
   id: string;
   owner_id: string;
   name: string;
+  sort_order: number;
+  collapsed: boolean;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
