@@ -20,7 +20,10 @@ export const columnTypes: { value: ColumnType; label: string }[] = [
 export function newDatabase() {
   return {
     title: "Untitled database",
-    columns: [{ id: crypto.randomUUID(), name: "Item Name", type: "itemName", options: [] }] as DatabaseColumn[],
+    columns: [
+      { id: crypto.randomUUID(), name: "Item Name", type: "itemName", options: [] },
+      ...[1, 2, 3].map((number) => ({ id: crypto.randomUUID(), name: `Text ${number}`, type: "text" as const, options: [] })),
+    ] as DatabaseColumn[],
     rows: [] as DatabaseRow[],
   };
 }
@@ -42,6 +45,7 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [popover, setPopover] = useState<null | { kind: "new" | "edit"; columnId?: string; top: number; left: number }>(null);
   const [newColumnName, setNewColumnName] = useState("");
+  const [newOption, setNewOption] = useState("");
 
   useEffect(() => {
     if (!popover) return;
@@ -76,6 +80,7 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
       left: Math.max(0, Math.min(buttonRect.left - rootRect.left, rootRect.width - 248)),
     });
     if (kind === "new") setNewColumnName("");
+    if (kind === "edit") setNewOption("");
   }
 
   function changeColumn(id: string, change: Partial<DatabaseColumn>) {
@@ -85,6 +90,27 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
   function changeCell(rowId: string, columnId: string, value: string | string[]) {
     updateAttributes({ rows: rows.map((row) => row.id === rowId
       ? { ...row, cells: { ...row.cells, [columnId]: value } } : row) });
+  }
+
+  function addOption(column: DatabaseColumn) {
+    const option = newOption.trim();
+    if (!option || column.options.includes(option)) return;
+    changeColumn(column.id, { options: [...column.options, option] });
+    setNewOption("");
+  }
+
+  function removeOption(column: DatabaseColumn, option: string) {
+    updateAttributes({
+      columns: columns.map((item) => item.id === column.id
+        ? { ...item, options: item.options.filter((value) => value !== option) } : item),
+      rows: rows.map((row) => {
+        const value = row.cells[column.id];
+        if (Array.isArray(value)) return { ...row, cells: { ...row.cells,
+          [column.id]: value.filter((item) => item !== option) } };
+        if (value === option) return { ...row, cells: { ...row.cells, [column.id]: "" } };
+        return row;
+      }),
+    });
   }
 
   function addColumn(type: ColumnType) {
@@ -99,6 +125,9 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
     const label = `${column.name} for row ${rows.indexOf(row) + 1}`;
     if (column.type === "singleSelect") return (
       <span className="database-cell-select">
+        {typeof value === "string" && value
+          ? <span className="database-tag">{value}</span>
+          : <span className="database-select-placeholder">Select…</span>}
         <select aria-label={label} value={typeof value === "string" ? value : ""}
           onChange={(event) => changeCell(row.id, column.id, event.target.value)}>
           <option value="">Select…</option>
@@ -165,8 +194,8 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
           </tr>)}
         </tbody>
       </table>
+      <button type="button" className="database-add-row" onClick={() => updateAttributes({ rows: [...rows, { id: crypto.randomUUID(), cells: {} }] })}>＋ New row</button>
     </div>
-    <button type="button" className="database-add-row" onClick={() => updateAttributes({ rows: [...rows, { id: crypto.randomUUID(), cells: {} }] })}>＋ New row</button>
     {popover?.kind === "new" && <div className="database-popover" style={{ top: popover.top, left: popover.left }}>
       <label className="database-popover-label" htmlFor="new-database-column">New property</label>
       <input id="new-database-column" className="database-popover-name" aria-label="New column name"
@@ -201,12 +230,20 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
           <ChevronDown size={16} aria-hidden="true" />
           </span>
         </label>
-        {(column.type === "singleSelect" || column.type === "multiSelect") &&
-          <label className="database-popover-label">Options <small>Separate with commas</small>
-            <input aria-label="Column options" defaultValue={column.options.join(", ")}
-              key={column.id + column.type}
-              onChange={(event) => changeColumn(column.id, { options: [...new Set(event.target.value.split(",").map((option) => option.trim()).filter(Boolean))] })} />
-          </label>}
+        {(column.type === "singleSelect" || column.type === "multiSelect") && <div className="database-options">
+          <div className="database-popover-label">Options</div>
+          {column.options.length > 0 && <div className="database-option-tags">
+            {column.options.map((option) => <button key={option} type="button" className="database-tag"
+              aria-label={`Remove ${option} option`} onClick={() => removeOption(column, option)}>{option} ×</button>)}
+          </div>}
+          <div className="database-option-entry">
+            <input aria-label="New option" placeholder="Add an option" value={newOption}
+              onChange={(event) => setNewOption(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addOption(column); } }} />
+            <button type="button" aria-label="Add option" disabled={!newOption.trim() || column.options.includes(newOption.trim())}
+              onClick={() => addOption(column)}>Add</button>
+          </div>
+        </div>}
         {columns.length > 1 && <button type="button" className="database-remove-column"
           onClick={() => {
             updateAttributes({ columns: columns.filter((item) => item.id !== column.id) });
