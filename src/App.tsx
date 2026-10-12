@@ -4,12 +4,15 @@ import type { Editor, JSONContent } from "@tiptap/core";
 import type { Session } from "@supabase/supabase-js";
 import {
   Bold,
+  Archive,
+  ArchiveRestore,
   Bell,
   Braces,
   Check,
   CheckSquare,
   ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Download,
   Ellipsis,
   FolderPlus,
@@ -18,6 +21,7 @@ import {
   Link as LinkIcon,
   List,
   ListOrdered,
+  Maximize2,
   MessageCircle,
   MessageCirclePlus,
   Plus,
@@ -25,7 +29,6 @@ import {
   Redo2,
   Search,
   ShieldCheck,
-  Trash2,
   Undo2,
   Upload,
   X,
@@ -36,7 +39,14 @@ import {
   inputToContent,
   welcomeMarkdown,
 } from "./lib/editor";
-import { nextTopSortOrder } from "./lib/documents";
+import {
+  applySlashCommand,
+  filterSlashCommands,
+  getSlashCommandMatch,
+  type SlashCommandId,
+  type SlashCommandMatch,
+} from "./lib/slashCommands";
+import { isAvailableDocument, nextTopSortOrder } from "./lib/documents";
 import {
   clearDocumentDraft,
   createBackup,
@@ -56,6 +66,8 @@ import {
   setCommentStatus,
   updateDocument,
   updateDocumentLayout,
+  updateProject,
+  updateProjectLayout,
   updateNotification,
 } from "./lib/repository";
 import {
@@ -77,9 +89,19 @@ import type {
   WorkspaceData,
 } from "./types";
 
-type DocumentUpdates = Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "project_id" | "sort_order">>;
+type DocumentUpdates = Partial<Pick<NoteDocument, "title" | "content_json" | "plain_text" | "deleted_at" | "archived_at" | "project_id" | "sort_order">>;
 type SaveState = "saved" | "pending" | "saving" | "error";
 type Selection = { from: number; to: number; quote: string } | null;
+type ProjectDropTarget = { projectId: string; position: "before" | "after" } | null;
+type SlashMenuState = SlashCommandMatch & { top: number; left: number; selectedIndex: number };
+
+const defaultRailWidth = 223;
+const railWidthStorageKey = "noted-sidebar-width";
+const wideContentStorageKey = "noted-wide-content";
+
+function lastViewedDocumentKey(ownerId: string | null | undefined): string {
+  return `noted-last-viewed-document-${ownerId ?? "local"}`;
+}
 
 const blankContent: JSONContent = { type: "doc", content: [{ type: "paragraph" }] };
 
@@ -168,8 +190,8 @@ function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => 
       <form className="auth-card" onSubmit={submit}>
         <div className="brand-mark">N</div>
         <p className="eyebrow"><ShieldCheck size={14} /> Private workspace</p>
-        <h1>Welcome to Notes</h1>
-        <p>Your notes, comments, revisions, and backups stay in your Supabase workspace.</p>
+        <h1>Welcome to Noted</h1>
+        <p>Sign in with your existing account to access your private workspace.</p>
         <label htmlFor="email">Email address</label>
         <input
           id="email"
@@ -202,6 +224,7 @@ export default function App() {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [error, setError] = useState("");
   const [searching, setSearching] = useState(false);
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
@@ -212,6 +235,16 @@ export default function App() {
   const [commentDraft, setCommentDraft] = useState("");
   const [commenting, setCommenting] = useState(false);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [draggedProject, setDraggedProject] = useState<{ id: string; name: string; x: number; y: number } | null>(null);
+  const [projectDropTarget, setProjectDropTarget] = useState<ProjectDropTarget>(null);
+  const [projectEndDropTarget, setProjectEndDropTarget] = useState(false);
+  const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
+  const [wideContent, setWideContent] = useState(() => localStorage.getItem(wideContentStorageKey) === "true");
+  const [railWidth, setRailWidth] = useState(() => {
+    const stored = Number(localStorage.getItem(railWidthStorageKey));
+    return Number.isFinite(stored) && stored >= 180 && stored <= 420 ? stored : defaultRailWidth;
+  });
 
   const userId = session?.user.id ?? null;
   const documentsRef = useRef(documents);
@@ -225,8 +258,15 @@ export default function App() {
   const saveTimer = useRef<number | null>(null);
   const refreshing = useRef(false);
   const pendingUpdates = useRef(new Map<string, DocumentUpdates>());
+  const saveInFlight = useRef<Promise<void> | null>(null);
   const editorDocumentId = useRef<string | null>(null);
   const commentCardRefs = useRef(new Map<string, HTMLElement>());
+  const documentPageRef = useRef<HTMLElement | null>(null);
+  const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
+  const slashMenuRef = useRef<SlashMenuState | null>(null);
+  const slashCommandChangeRef = useRef<(editor: Editor, allowOpen: boolean) => void>(() => undefined);
+  const slashCommandKeyDownRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  const runSlashCommandRef = useRef<(commandId: SlashCommandId) => void>(() => undefined);
 
   useEffect(() => { documentsRef.current = documents; }, [documents]);
   useEffect(() => { projectsRef.current = projects; }, [projects]);
@@ -234,8 +274,34 @@ export default function App() {
   useEffect(() => { repliesRef.current = replies; }, [replies]);
   useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => {
+    if (activeId) localStorage.setItem(lastViewedDocumentKey(userId), activeId);
+  }, [activeId, userId]);
   useEffect(() => { displayNameRef.current = displayName; }, [displayName]);
   useEffect(() => { userIdRef.current = userId; }, [userId]);
+  useEffect(() => {
+    if (!mobileRailOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileRailOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileRailOpen]);
+  useEffect(() => {
+    if (!toolbarMenuOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!toolbarMenuRef.current?.contains(event.target as Node)) setToolbarMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setToolbarMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [toolbarMenuOpen]);
 
   const editorChangeRef = useRef<(editor: Editor) => void>(() => undefined);
   const selectionChangeRef = useRef<(editor: Editor) => void>(() => undefined);
@@ -257,14 +323,86 @@ export default function App() {
         if (commentId) return openCommentThread(commentId);
         return false;
       },
+      handleKeyDown: (_view, event) => slashCommandKeyDownRef.current(event),
     },
-    onUpdate: ({ editor: currentEditor }) => editorChangeRef.current(currentEditor),
-    onSelectionUpdate: ({ editor: currentEditor }) => selectionChangeRef.current(currentEditor),
+    onUpdate: ({ editor: currentEditor }) => {
+      editorChangeRef.current(currentEditor);
+      slashCommandChangeRef.current(currentEditor, true);
+    },
+    onSelectionUpdate: ({ editor: currentEditor }) => {
+      selectionChangeRef.current(currentEditor);
+      slashCommandChangeRef.current(currentEditor, false);
+    },
   });
 
+  function updateSlashMenu(next: SlashMenuState | null) {
+    slashMenuRef.current = next;
+    setSlashMenu(next);
+  }
+
+  slashCommandChangeRef.current = (currentEditor, allowOpen) => {
+    const match = getSlashCommandMatch(currentEditor);
+    if (!match || (!allowOpen && !slashMenuRef.current)) {
+      if (slashMenuRef.current) updateSlashMenu(null);
+      return;
+    }
+
+    const page = documentPageRef.current;
+    if (!page) return;
+    const caret = currentEditor.view.coordsAtPos(currentEditor.state.selection.from);
+    const pageRect = page.getBoundingClientRect();
+    const menuWidth = Math.min(320, pageRect.width);
+    const previous = slashMenuRef.current;
+    const filteredCount = filterSlashCommands(match.query).length;
+    const next: SlashMenuState = {
+      ...match,
+      top: caret.bottom - pageRect.top + 7,
+      left: Math.max(0, Math.min(caret.left - pageRect.left, pageRect.width - menuWidth)),
+      selectedIndex: previous?.query === match.query
+        ? Math.min(previous.selectedIndex, Math.max(filteredCount - 1, 0))
+        : 0,
+    };
+    updateSlashMenu(next);
+  };
+
+  runSlashCommandRef.current = (commandId) => {
+    const current = slashMenuRef.current;
+    if (!editor || !current) return;
+    updateSlashMenu(null);
+    applySlashCommand(editor, commandId, current);
+  };
+
+  slashCommandKeyDownRef.current = (event) => {
+    const current = slashMenuRef.current;
+    if (!current) return false;
+    const filtered = filterSlashCommands(current.query);
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!filtered.length) return true;
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      updateSlashMenu({
+        ...current,
+        selectedIndex: (current.selectedIndex + direction + filtered.length) % filtered.length,
+      });
+      return true;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && filtered.length) {
+      event.preventDefault();
+      runSlashCommandRef.current(filtered[current.selectedIndex]?.id ?? filtered[0].id);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      updateSlashMenu(null);
+      return true;
+    }
+    return false;
+  };
+
   const activeDocument = useMemo(
-    () => documents.find((document) => document.id === activeId) ?? null,
-    [documents, activeId],
+    () => documents.find((document) => document.id === activeId && isAvailableDocument(document, projects)) ?? null,
+    [documents, activeId, projects],
   );
 
   const workspaceData = useCallback((): WorkspaceData => ({
@@ -299,7 +437,7 @@ export default function App() {
         const content = inputToContent(welcomeMarkdown, "markdown");
         const welcome = await createDocument(
           userIdRef.current,
-          "Welcome to Notes",
+          "Welcome to Noted",
           content,
           contentToPlainText(content),
         );
@@ -311,9 +449,13 @@ export default function App() {
       setReplies(data.replies);
       setNotifications(data.notifications);
       setDisplayName(data.displayName);
-      setActiveId((current) => current && data.documents.some((item) => item.id === current)
+      const availableDocuments = data.documents.filter((item) => isAvailableDocument(item, data.projects));
+      const rememberedId = localStorage.getItem(lastViewedDocumentKey(userIdRef.current));
+      setActiveId((current) => current && availableDocuments.some((item) => item.id === current)
         ? current
-        : data.documents[0]?.id ?? null);
+        : availableDocuments.find((item) => item.id === rememberedId)?.id
+          ?? availableDocuments[0]?.id
+          ?? null);
 
       if (supabase && await needsDailyBackup(userIdRef.current)) {
         await saveCloudBackup(userIdRef.current, createBackup(data));
@@ -392,6 +534,7 @@ export default function App() {
       });
       editorDocumentId.current = activeDocument.id;
       setSelection(null);
+      updateSlashMenu(null);
     }
   }, [editor, activeDocument?.id, activeDocument?.revision, activeDocument?.content_json]);
 
@@ -439,49 +582,58 @@ export default function App() {
   }, [activeId, commentFilter, comments, commentsOpen, focusedCommentId]);
 
   const flushPendingSave = useCallback(async () => {
+    if (saveInFlight.current) await saveInFlight.current;
     const entries = [...pendingUpdates.current.entries()];
     if (!entries.length) return;
-    entries.forEach(([documentId]) => pendingUpdates.current.delete(documentId));
-    setSaveState("saving");
-    const results = await Promise.allSettled(entries.map(([documentId, updates]) =>
-      updateDocument(userIdRef.current, documentId, updates)));
-    const savedDocuments = new Map<string, NoteDocument>();
-    const failures: string[] = [];
+    const save = (async () => {
+      entries.forEach(([documentId]) => pendingUpdates.current.delete(documentId));
+      setSaveState("saving");
+      const results = await Promise.allSettled(entries.map(([documentId, updates]) =>
+        updateDocument(userIdRef.current, documentId, updates)));
+      const savedDocuments = new Map<string, NoteDocument>();
+      const failures: string[] = [];
 
-    results.forEach((result, index) => {
-      const [documentId, submitted] = entries[index];
-      if (result.status === "fulfilled") {
-        savedDocuments.set(documentId, result.value);
-        return;
-      }
-      const newer = pendingUpdates.current.get(documentId);
-      pendingUpdates.current.set(documentId, { ...submitted, ...newer });
-      failures.push(result.reason instanceof Error ? result.reason.message : "Unable to save this note.");
-    });
-
-    setDocuments((current) => {
-      const next = current.map((document) => {
-        const saved = savedDocuments.get(document.id);
-        if (!saved || pendingUpdates.current.has(document.id)) return document;
-        clearDocumentDraft(document.id);
-        return saved;
+      results.forEach((result, index) => {
+        const [documentId, submitted] = entries[index];
+        if (result.status === "fulfilled") {
+          savedDocuments.set(documentId, result.value);
+          return;
+        }
+        const newer = pendingUpdates.current.get(documentId);
+        pendingUpdates.current.set(documentId, { ...submitted, ...newer });
+        failures.push(result.reason instanceof Error ? result.reason.message : "Unable to save this note.");
       });
-      documentsRef.current = next;
-      return next;
-    });
 
-    if (failures.length) {
-      setSaveState("error");
-      setError(failures[0]);
-    } else if (pendingUpdates.current.size) {
-      setSaveState("pending");
-    } else {
-      setSaveState("saved");
-    }
+      setDocuments((current) => {
+        const next = current.map((document) => {
+          const saved = savedDocuments.get(document.id);
+          if (!saved || pendingUpdates.current.has(document.id)) return document;
+          clearDocumentDraft(document.id);
+          return saved;
+        });
+        documentsRef.current = next;
+        return next;
+      });
 
-    if (pendingUpdates.current.size) {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+      if (failures.length) {
+        setSaveState("error");
+        setError(failures[0]);
+      } else if (pendingUpdates.current.size) {
+        setSaveState("pending");
+      } else {
+        setSaveState("saved");
+      }
+
+      if (pendingUpdates.current.size) {
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+      }
+    })();
+    saveInFlight.current = save;
+    try {
+      await save;
+    } finally {
+      if (saveInFlight.current === save) saveInFlight.current = null;
     }
   }, []);
 
@@ -547,6 +699,7 @@ export default function App() {
       documentsRef.current = next;
       setDocuments(next);
       setActiveId(note.id);
+      setMobileRailOpen(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to create a note.");
     }
@@ -556,8 +709,12 @@ export default function App() {
     const name = window.prompt("Project name", "Untitled project")?.trim();
     if (!name) return;
     try {
-      const project = await createProject(userId, name);
+      const sortOrder = projectsRef.current.length
+        ? Math.max(...projectsRef.current.map((project) => project.sort_order ?? 0)) + 1
+        : 0;
+      const project = await createProject(userId, name, sortOrder);
       setProjects((current) => [...current, project]);
+      setMobileRailOpen(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to create a project.");
     }
@@ -571,6 +728,43 @@ export default function App() {
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to rename the project.");
+    }
+  }
+
+  async function handleProjectCollapsed(project: NoteProject) {
+    const collapsed = !project.collapsed;
+    setProjects((current) => current.map((item) => item.id === project.id ? { ...item, collapsed } : item));
+    try {
+      const updated = await updateProject(userId, project.id, { collapsed });
+      setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+    } catch (caught) {
+      setProjects((current) => current.map((item) => item.id === project.id ? project : item));
+      setError(caught instanceof Error ? caught.message : "Unable to update the project.");
+    }
+  }
+
+  async function arrangeProject(projectId: string, targetProjectId: string | null = null, placeAfter = false) {
+    const original = projectsRef.current;
+    if (projectId === targetProjectId) return;
+    const moving = original.find((project) => project.id === projectId);
+    if (!moving) return;
+    const arranged = original.filter((project) => project.id !== projectId && !project.archived_at)
+      .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0));
+    const targetIndex = targetProjectId
+      ? Math.max(0, arranged.findIndex((project) => project.id === targetProjectId))
+      : arranged.length;
+    const insertAt = targetProjectId && placeAfter ? targetIndex + 1 : targetIndex;
+    arranged.splice(insertAt, 0, moving);
+    const changed = new Map(arranged.map((project, index) => [project.id, { ...project, sort_order: index }]));
+    const next = original.map((project) => changed.get(project.id) ?? project);
+    projectsRef.current = next;
+    setProjects(next);
+    try {
+      await updateProjectLayout(userId, [...changed.values()].map(({ id, sort_order }) => ({ id, sort_order })));
+    } catch (caught) {
+      projectsRef.current = original;
+      setProjects(original);
+      setError(caught instanceof Error ? caught.message : "Unable to arrange the projects.");
     }
   }
 
@@ -620,22 +814,134 @@ export default function App() {
     event.dataTransfer.setData("text/plain", documentId);
   }
 
+  function startProjectDrag(event: React.DragEvent<HTMLElement>, project: NoteProject) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-notes-project", project.id);
+    setDraggedProject({ id: project.id, name: project.name, x: event.clientX, y: event.clientY });
+    setProjectDropTarget(null);
+    setProjectEndDropTarget(false);
+  }
+
+  function updateProjectDrag(event: React.DragEvent<HTMLElement>) {
+    if (!event.clientX && !event.clientY) return;
+    setDraggedProject((current) => current ? { ...current, x: event.clientX, y: event.clientY } : current);
+  }
+
+  function endProjectDrag() {
+    setDraggedProject(null);
+    setProjectDropTarget(null);
+    setProjectEndDropTarget(false);
+  }
+
+  function setProjectLandingSpot(event: React.DragEvent<HTMLElement>, projectId: string) {
+    const movingProjectId = droppedProjectId(event) || draggedProject?.id;
+    if (!movingProjectId || movingProjectId === projectId) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    setProjectDropTarget((current) => current?.projectId === projectId && current.position === position
+      ? current
+      : { projectId, position });
+    setProjectEndDropTarget(false);
+  }
+
+  function startRailResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = railWidth;
+    const resize = (moveEvent: PointerEvent) => {
+      const maxWidth = Math.min(420, window.innerWidth - 360);
+      setRailWidth(Math.max(180, Math.min(maxWidth, startWidth + moveEvent.clientX - startX)));
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("is-resizing-sidebar");
+      setRailWidth((width) => {
+        localStorage.setItem(railWidthStorageKey, String(width));
+        return width;
+      });
+    };
+    document.body.classList.add("is-resizing-sidebar");
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+  }
+
+  function toggleWideContent() {
+    setWideContent((current) => {
+      const next = !current;
+      localStorage.setItem(wideContentStorageKey, String(next));
+      return next;
+    });
+  }
+
   function droppedDocumentId(event: React.DragEvent<HTMLElement>) {
     return event.dataTransfer.getData("application/x-notes-document") || event.dataTransfer.getData("text/plain");
   }
 
-  async function handleDeleteDocument(document: NoteDocument) {
-    if (!window.confirm(`Move “${document.title}” out of this workspace? Its revisions remain backed up.`)) return;
+  function droppedProjectId(event: React.DragEvent<HTMLElement>) {
+    return event.dataTransfer.getData("application/x-notes-project");
+  }
+
+  async function handleArchiveDocument(document: NoteDocument) {
+    if (!window.confirm(`Archive “${document.title}”? You can restore it from Archived.`)) return;
     try {
-      await updateDocument(userId, document.id, { deleted_at: new Date().toISOString() });
+      await flushPendingSave();
+      if (pendingUpdates.current.has(document.id)) {
+        throw new Error("Save this note before archiving it.");
+      }
+      const archivedAt = new Date().toISOString();
+      const latest = documentsRef.current.find((item) => item.id === document.id) ?? document;
+      const updated = await updateDocument(userId, document.id, {
+        title: latest.title,
+        content_json: latest.content_json,
+        plain_text: latest.plain_text,
+        archived_at: archivedAt,
+      });
       pendingUpdates.current.delete(document.id);
       clearDocumentDraft(document.id);
-      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      setDocuments((current) => current.map((item) => item.id === document.id ? updated : item));
       if (activeId === document.id) {
-        setActiveId(documents.find((item) => item.id !== document.id)?.id ?? null);
+        setActiveId(documents.find((item) => item.id !== document.id && isAvailableDocument(item, projectsRef.current))?.id ?? null);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to remove this note.");
+      setError(caught instanceof Error ? caught.message : "Unable to archive this note.");
+    }
+  }
+
+  async function handleRestoreDocument(document: NoteDocument) {
+    try {
+      const updated = await updateDocument(userId, document.id, { archived_at: null });
+      setDocuments((current) => current.map((item) => item.id === document.id ? updated : item));
+      if (isAvailableDocument(updated, projectsRef.current)) {
+        setActiveId(updated.id);
+        setMobileRailOpen(false);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to restore this note.");
+    }
+  }
+
+  async function handleArchiveProject(project: NoteProject) {
+    if (!window.confirm(`Archive “${project.name}”? Its notes will stay together and can be restored from Archived.`)) return;
+    try {
+      const updated = await updateProject(userId, project.id, { archived_at: new Date().toISOString() });
+      setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+      if (activeDocument?.project_id === project.id) {
+        setActiveId(documents.find((item) => item.project_id !== project.id && isAvailableDocument(item, projectsRef.current))?.id ?? null);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to archive this project.");
+    }
+  }
+
+  async function handleRestoreProject(project: NoteProject) {
+    try {
+      const updated = await updateProject(userId, project.id, { archived_at: null });
+      setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to restore this project.");
     }
   }
 
@@ -711,7 +1017,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = window.document.createElement("a");
     link.href = url;
-    link.download = `notes-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `noted-backup-${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -770,25 +1076,65 @@ export default function App() {
 
   const webMcpApiRef = useRef<WebMcpApi | null>(null);
   webMcpApiRef.current = {
+    listProjects: async (search, includeArchived = false) => {
+      const normalized = search?.toLowerCase();
+      return projectsRef.current
+        .filter((project) => includeArchived || !project.archived_at)
+        .filter((project) => !normalized || project.name.toLowerCase().includes(normalized))
+        .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0))
+        .map((project) => ({
+          id: project.id,
+          name: project.name,
+          sort_order: project.sort_order,
+          archived_at: project.archived_at,
+          note_count: documentsRef.current.filter((document) =>
+            document.project_id === project.id && !document.archived_at && !document.deleted_at).length,
+        }));
+    },
+    createProject: async (name) => {
+      const trimmedName = name.trim();
+      if (!trimmedName) throw new Error("Project name is required.");
+      const sortOrder = projectsRef.current.length
+        ? Math.max(...projectsRef.current.map((project) => project.sort_order ?? 0)) + 1
+        : 0;
+      const project = await createProject(userIdRef.current, trimmedName, sortOrder);
+      const next = [...projectsRef.current, project];
+      projectsRef.current = next;
+      setProjects(next);
+      return project;
+    },
     listDocuments: async (search, limit = 50) => {
       const normalized = search?.toLowerCase();
+      const projectById = new Map(projectsRef.current.map((project) => [project.id, project]));
       return documentsRef.current
-        .filter((item) => !normalized || `${item.title}\n${item.plain_text}`.toLowerCase().includes(normalized))
+        .filter((item) => isAvailableDocument(item, projectsRef.current))
+        .filter((item) => !normalized || `${item.title}\n${item.plain_text}\n${projectById.get(item.project_id ?? "")?.name ?? ""}`.toLowerCase().includes(normalized))
         .slice(0, Math.min(limit, 100))
-        .map((item) => ({ id: item.id, title: item.title, updated_at: item.updated_at, revision: item.revision, snippet: item.plain_text.slice(0, 240) }));
+        .map((item) => ({
+          id: item.id,
+          title: item.title,
+          updated_at: item.updated_at,
+          revision: item.revision,
+          snippet: item.plain_text.slice(0, 240),
+          project: item.project_id ? (() => {
+            const project = projectById.get(item.project_id!);
+            return project ? { id: project.id, name: project.name } : { id: item.project_id, name: "Unknown project" };
+          })() : null,
+        }));
     },
     getDocument: async (documentId) => {
       const note = documentsRef.current.find((item) => item.id === documentId);
-      if (!note) throw new Error("Document not found.");
+      if (!note || !isAvailableDocument(note, projectsRef.current)) throw new Error("Document not found.");
+      const project = note.project_id ? projectsRef.current.find((item) => item.id === note.project_id) : null;
       const threads = commentsRef.current.filter((item) => item.document_id === documentId);
-      return { ...note, comments: threads.map((thread) => ({
+      return { ...note, project: project ? { id: project.id, name: project.name } : null, comments: threads.map((thread) => ({
         ...thread,
         replies: repliesRef.current.filter((reply) => reply.comment_id === thread.id),
       })) };
     },
     openDocument: async (documentId) => {
       const note = documentsRef.current.find((item) => item.id === documentId);
-      if (!note) throw new Error("Document not found.");
+      if (!note || !isAvailableDocument(note, projectsRef.current)) throw new Error("Document not found.");
       setActiveId(documentId);
       return { opened: true, document_id: documentId, title: note.title };
     },
@@ -804,7 +1150,7 @@ export default function App() {
     },
     updateDocument: async ({ documentId, title, content, format, mode }) => {
       const existing = documentsRef.current.find((item) => item.id === documentId);
-      if (!existing) throw new Error("Document not found.");
+      if (!existing || !isAvailableDocument(existing, projectsRef.current)) throw new Error("Document not found.");
       let contentJson = existing.content_json;
       if (content !== undefined) {
         const incoming = inputToContent(content, format);
@@ -874,10 +1220,17 @@ export default function App() {
         const document = thread
           ? documentsRef.current.find((item) => item.id === thread.document_id)
           : null;
+        const project = document?.project_id
+          ? projectsRef.current.find((item) => item.id === document.project_id)
+          : null;
         return {
           ...notification,
           source: sourceReply ?? thread ?? null,
-          document: document ? { id: document.id, title: document.title } : null,
+          document: document ? {
+            id: document.id,
+            title: document.title,
+            project: project ? { id: project.id, name: project.name } : null,
+          } : null,
           thread,
           replies: repliesRef.current.filter((reply) => reply.comment_id === notification.comment_id),
         };
@@ -906,6 +1259,8 @@ export default function App() {
   useEffect(() => {
     if (!webMcpApiRef.current) return;
     void registerWebMcpTools({
+      listProjects: (...args) => webMcpApiRef.current!.listProjects(...args),
+      createProject: (...args) => webMcpApiRef.current!.createProject(...args),
       listDocuments: (...args) => webMcpApiRef.current!.listDocuments(...args),
       getDocument: (...args) => webMcpApiRef.current!.getDocument(...args),
       openDocument: (...args) => webMcpApiRef.current!.openDocument(...args),
@@ -921,7 +1276,13 @@ export default function App() {
     });
   }, []);
 
-  const visibleDocuments = documents.filter((document) => {
+  const activeProjects = projects
+    .filter((project) => !project.archived_at)
+    .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0));
+  const archivedProjects = projects.filter((project) => Boolean(project.archived_at));
+  const activeDocuments = documents.filter((document) => isAvailableDocument(document, projects));
+  const archivedDocuments = documents.filter((document) => Boolean(document.archived_at));
+  const visibleDocuments = activeDocuments.filter((document) => {
     const normalized = query.trim().toLowerCase();
     return !normalized || `${document.title}\n${document.plain_text}`.toLowerCase().includes(normalized);
   });
@@ -940,16 +1301,33 @@ export default function App() {
     return <AuthGate onAuthenticated={setSession} />;
   }
 
+  function selectDocument(documentId: string) {
+    setActiveId(documentId);
+    setMobileRailOpen(false);
+  }
+
   return (
-    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""}`}>
-      <aside className="document-rail" aria-label="Documents">
+    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""} ${mobileRailOpen ? "mobile-rail-open" : ""}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+      {draggedProject && (
+        <div className="project-drag-preview" style={{ left: draggedProject.x + 12, top: draggedProject.y + 12 }} aria-hidden="true">
+          <GripVertical size={13} /> {draggedProject.name}
+        </div>
+      )}
+      <button type="button" className="mobile-rail-backdrop" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)} />
+      <aside className="document-rail" aria-label="Documents" id="document-rail">
         <div className="rail-actions">
-          <button type="button" className="new-note" onClick={() => void handleNewDocument()}>
-            <Plus size={17} /> New note
-          </button>
-          <IconButton label="Search documents" active={searching} onClick={() => setSearching((value) => !value)}>
-            <Search size={18} />
-          </IconButton>
+          <span className="rail-brand">Noted</span>
+          <div className="rail-tools">
+            <IconButton label="Search documents" active={searching} onClick={() => setSearching((value) => !value)}>
+              <Search size={18} />
+            </IconButton>
+            <button type="button" className="new-note" aria-label="New note" title="New note" onClick={() => void handleNewDocument()}>
+              <Plus size={18} />
+            </button>
+            <button type="button" className="mobile-rail-close" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)}>
+              <X size={18} />
+            </button>
+          </div>
         </div>
         {searching && (
           <div className="search-box">
@@ -965,24 +1343,72 @@ export default function App() {
               <FolderPlus size={14} />
             </button>
           </div>
-          {projects.map((project) => {
+          {activeProjects.map((project) => {
             const projectDocuments = visibleDocuments.filter((document) => document.project_id === project.id);
             return (
               <section
-                className="project-group"
+                className={`project-group ${draggedProject?.id === project.id ? "is-dragging" : ""} ${projectDropTarget?.projectId === project.id ? `is-drop-${projectDropTarget.position}` : ""}`}
                 key={project.id}
                 onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
-                onDrop={(event) => { event.preventDefault(); void arrangeDocument(droppedDocumentId(event), project.id); }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const projectId = droppedProjectId(event);
+                  if (projectId) void arrangeProject(projectId);
+                  else void arrangeDocument(droppedDocumentId(event), project.id);
+                  endProjectDrag();
+                }}
               >
-                <div className="project-heading">
+                <div
+                  className="project-heading"
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.dataTransfer.dropEffect = "move";
+                    setProjectLandingSpot(event, project.id);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const projectId = droppedProjectId(event);
+                    if (projectId) {
+                      const position = projectDropTarget?.projectId === project.id
+                        ? projectDropTarget.position
+                        : "before";
+                      void arrangeProject(projectId, project.id, position === "after");
+                    }
+                    else void arrangeDocument(droppedDocumentId(event), project.id);
+                    endProjectDrag();
+                  }}
+                >
+                  <span
+                    className="project-drag-handle"
+                    title="Drag project"
+                    draggable
+                    onDragStart={(event) => startProjectDrag(event, project)}
+                    onDrag={(event) => updateProjectDrag(event)}
+                    onDragEnd={endProjectDrag}
+                  ><GripVertical size={13} /></span>
+                  <button
+                    type="button"
+                    className="project-collapse"
+                    aria-label={`${project.collapsed ? "Expand" : "Collapse"} ${project.name}`}
+                    aria-expanded={!project.collapsed}
+                    title={project.collapsed ? "Expand project" : "Collapse project"}
+                    onClick={() => void handleProjectCollapsed(project)}
+                  >
+                    {project.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  </button>
                   <button type="button" className="project-title" title="Rename project" onClick={() => void handleRenameProject(project)}>
                     {project.name}
                   </button>
                   <button type="button" className="project-new-note" aria-label={`New note in ${project.name}`} onClick={() => void handleNewDocument(project.id)}>
                     <Plus size={13} />
                   </button>
+                  <button type="button" className="project-archive" aria-label={`Archive ${project.name}`} title="Archive project" onClick={() => void handleArchiveProject(project)}>
+                    <Archive size={13} />
+                  </button>
                 </div>
-                {projectDocuments.map((document) => (
+                {!project.collapsed && projectDocuments.map((document) => (
                   <div
                     className={`document-row project-document ${document.id === activeId ? "is-selected" : ""}`}
                     draggable
@@ -994,15 +1420,36 @@ export default function App() {
                     <span className="drag-handle" title="Drag note">
                       <GripVertical size={13} />
                     </span>
-                    <button type="button" onClick={() => setActiveId(document.id)}>{document.title}</button>
-                    <button type="button" className="delete-note" aria-label={`Delete ${document.title}`} onClick={() => void handleDeleteDocument(document)}>
-                      <Trash2 size={14} />
+                    <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
+                    <button type="button" className="archive-note" aria-label={`Archive ${document.title}`} title="Archive note" onClick={() => void handleArchiveDocument(document)}>
+                      <Archive size={14} />
                     </button>
                   </div>
                 ))}
               </section>
             );
           })}
+          <div
+            className={`project-end-drop-zone ${projectEndDropTarget ? "is-active" : ""}`}
+            aria-hidden={!draggedProject}
+            onDragOver={(event) => {
+              const projectId = droppedProjectId(event) || draggedProject?.id;
+              if (!projectId) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setProjectDropTarget(null);
+              setProjectEndDropTarget(true);
+            }}
+            onDrop={(event) => {
+              const projectId = droppedProjectId(event);
+              if (!projectId) return;
+              event.preventDefault();
+              void arrangeProject(projectId);
+              endProjectDrag();
+            }}
+          >
+            <span>Move to bottom</span>
+          </div>
 
           <p
             className="rail-label drop-target"
@@ -1021,14 +1468,42 @@ export default function App() {
               <span className="drag-handle" title="Drag note">
                 <GripVertical size={13} />
               </span>
-              <button type="button" onClick={() => setActiveId(document.id)}>{document.title}</button>
-              <button type="button" className="delete-note" aria-label={`Delete ${document.title}`} onClick={() => void handleDeleteDocument(document)}>
-                <Trash2 size={14} />
+              <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
+              <button type="button" className="archive-note" aria-label={`Archive ${document.title}`} title="Archive note" onClick={() => void handleArchiveDocument(document)}>
+                <Archive size={14} />
               </button>
             </div>
           ))}
           {!ungroupedDocuments.length && <p className="empty-list">No ungrouped notes.</p>}
+          {(archivedProjects.length > 0 || archivedDocuments.length > 0) && (
+            <details className="archive-list">
+              <summary>Archived ({archivedProjects.length + archivedDocuments.length})</summary>
+              {archivedProjects.map((project) => (
+                <div className="archive-row" key={project.id}>
+                  <span>{project.name}</span>
+                  <button type="button" title="Restore project" aria-label={`Restore ${project.name}`} onClick={() => void handleRestoreProject(project)}>
+                    <ArchiveRestore size={14} />
+                  </button>
+                </div>
+              ))}
+              {archivedDocuments.map((document) => (
+                <div className="archive-row" key={document.id}>
+                  <span>{document.title}</span>
+                  <button type="button" title="Restore note" aria-label={`Restore ${document.title}`} onClick={() => void handleRestoreDocument(document)}>
+                    <ArchiveRestore size={14} />
+                  </button>
+                </div>
+              ))}
+            </details>
+          )}
         </div>
+        <div
+          className="rail-resizer"
+          role="separator"
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          onPointerDown={startRailResize}
+        />
         <div className="rail-footer">
           <span className={`connection-dot ${isSupabaseConfigured ? "cloud" : "local"}`} />
           <Braces size={14} />
@@ -1039,7 +1514,17 @@ export default function App() {
 
       <main className="workspace">
         <header className="workspace-header">
-          <span className="document-breadcrumb">{activeDocument?.title ?? "Notes"}</span>
+          <span className="document-breadcrumb desktop-breadcrumb">{activeDocument?.title ?? "Noted"}</span>
+          <button
+            type="button"
+            className="document-breadcrumb mobile-rail-toggle"
+            aria-label="Open sidebar"
+            aria-controls="document-rail"
+            aria-expanded={mobileRailOpen}
+            onClick={() => setMobileRailOpen(true)}
+          >
+            <span>{activeDocument?.title ?? "Noted"}</span><ChevronDown size={14} />
+          </button>
           <div className="header-actions">
             <button type="button" className={`save-indicator ${saveState}`} onClick={() => setSettingsOpen(true)}>
               <span className="connection-dot cloud" />
@@ -1054,11 +1539,13 @@ export default function App() {
             <div className="notification-menu">
               <button
                 type="button"
-                className={`header-button notification-button ${notificationsOpen ? "is-active" : ""}`}
+                className={`header-button icon-only notification-button ${notificationsOpen ? "is-active" : ""}`}
+                aria-label="Mentions"
                 aria-expanded={notificationsOpen}
+                title="Mentions"
                 onClick={() => setNotificationsOpen((value) => !value)}
               >
-                <Bell size={18} /> Mentions
+                <Bell size={18} />
                 {unreadNotifications > 0 && <span className="count-badge">{unreadNotifications}</span>}
               </button>
               {notificationsOpen && (
@@ -1105,15 +1592,24 @@ export default function App() {
                 <MessageCirclePlus size={17} /> Comment
               </button>
             )}
-            <button type="button" className="header-button" onClick={() => { setFocusedCommentId(null); setCommentsOpen((value) => !value); }}>
-              <MessageCircle size={18} /> Comments {openThreads > 0 && <span className="count-badge">{openThreads}</span>}
+            <button
+              type="button"
+              className={`header-button icon-only ${commentsOpen ? "is-active" : ""}`}
+              aria-label="Comments"
+              aria-expanded={commentsOpen}
+              title="Comments"
+              onClick={() => { setFocusedCommentId(null); setCommentsOpen((value) => !value); }}
+            >
+              <MessageCircle size={18} />
+              {openThreads > 0 && <span className="count-badge">{openThreads}</span>}
             </button>
             <IconButton label="Workspace settings" onClick={() => setSettingsOpen(true)}><Ellipsis size={19} /></IconButton>
           </div>
         </header>
 
-        <section className="editor-area" aria-label="Editor">
+        <section className={`editor-area ${wideContent ? "is-wide" : ""}`} aria-label="Editor">
           <div className="toolbar" role="toolbar" aria-label="Text formatting">
+            <div className="toolbar-controls">
             <label className="style-select">
               <select
                 aria-label="Text style"
@@ -1152,12 +1648,50 @@ export default function App() {
             <span className="toolbar-spacer" />
             <IconButton label="Undo" disabled={!editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}><Undo2 size={17} /></IconButton>
             <IconButton label="Redo" disabled={!editor?.can().redo()} onClick={() => editor?.chain().focus().redo().run()}><Redo2 size={17} /></IconButton>
+            </div>
+            <div
+              ref={toolbarMenuRef}
+              className="toolbar-more-menu"
+            >
+              <button
+                type="button"
+                className={`icon-button ${toolbarMenuOpen ? "is-active" : ""}`}
+                aria-label="Page options"
+                aria-controls="page-options-popover"
+                aria-expanded={toolbarMenuOpen}
+                title="Page options"
+                onClick={() => setToolbarMenuOpen((value) => !value)}
+              >
+                <Ellipsis size={19} />
+              </button>
+              {toolbarMenuOpen && (
+                <div id="page-options-popover" className="toolbar-more-popover" role="group" aria-label="Page options">
+                  <label
+                    className="toolbar-menu-item"
+                  >
+                    <Maximize2 size={16} />
+                    <span>Wide</span>
+                    <span className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        checked={wideContent}
+                        onChange={toggleWideContent}
+                      />
+                      <span className="toggle-switch-track" aria-hidden="true">
+                        <span className="toggle-switch-thumb" />
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
           </div>
 
           {loading ? (
             <div className="editor-loading">Loading your notes…</div>
           ) : activeDocument ? (
-            <article className="document-page">
+            <article className="document-page" ref={documentPageRef}>
               <input
                 className="document-title"
                 aria-label="Document title"
@@ -1165,7 +1699,59 @@ export default function App() {
                 onChange={(event) => handleTitleChange(event.target.value)}
                 onBlur={() => void flushPendingSave()}
               />
-              <EditorContent editor={editor} onBlur={() => void flushPendingSave()} />
+              <EditorContent editor={editor} onBlur={() => {
+                updateSlashMenu(null);
+                void flushPendingSave();
+              }} />
+              {slashMenu && (() => {
+                const filtered = filterSlashCommands(slashMenu.query);
+                return (
+                  <div
+                    className="slash-command-menu"
+                    role="listbox"
+                    aria-label="Insert a block"
+                    style={{ top: slashMenu.top, left: slashMenu.left }}
+                  >
+                    <div className="slash-command-search" aria-hidden="true">
+                      <Search size={14} />
+                      <span><strong>/</strong>{slashMenu.query || "Type to filter…"}</span>
+                    </div>
+                    <div className="slash-command-label">Insert block</div>
+                    {filtered.map((option, index) => (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={index === slashMenu.selectedIndex}
+                        className={index === slashMenu.selectedIndex ? "is-selected" : ""}
+                        key={option.id}
+                        onMouseMove={() => {
+                          if (index !== slashMenu.selectedIndex) {
+                            updateSlashMenu({ ...slashMenu, selectedIndex: index });
+                          }
+                        }}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          runSlashCommandRef.current(option.id);
+                        }}
+                      >
+                        <span className={`slash-command-icon ${option.id}`}>
+                          {option.id === "checklist" ? <CheckSquare size={17} />
+                            : option.id === "quote" ? <Quote size={17} />
+                              : option.id === "paragraph" ? "T"
+                                : option.id.replace("heading-", "H")}
+                        </span>
+                        <span className="slash-command-copy">
+                          <strong>{option.label}</strong>
+                          <small>{option.description}</small>
+                        </span>
+                      </button>
+                    ))}
+                    {!filtered.length && (
+                      <p className="slash-command-empty">No blocks match “{slashMenu.query}”</p>
+                    )}
+                  </div>
+                );
+              })()}
             </article>
           ) : (
             <div className="editor-loading">Create a note to begin.</div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { nextTopSortOrder } from "./documents";
-import type { NoteDocument } from "../types";
+import { isAvailableDocument, nextTopSortOrder } from "./documents";
+import type { NoteDocument, NoteProject } from "../types";
 
 function document(projectId: string | null, sortOrder: number): NoteDocument {
   return {
@@ -13,6 +13,7 @@ function document(projectId: string | null, sortOrder: number): NoteDocument {
     created_at: "2026-09-14T00:00:00.000Z",
     updated_at: "2026-09-14T00:00:00.000Z",
     deleted_at: null,
+    archived_at: null,
     project_id: projectId,
     sort_order: sortOrder,
   };
@@ -30,5 +31,21 @@ describe("document ordering", () => {
 
     expect(nextTopSortOrder(documents, "project-1")).toBe(1);
     expect(nextTopSortOrder(documents, "empty-project")).toBe(0);
+  });
+});
+
+describe("available documents", () => {
+  it("hides an archived note and notes inside archived projects", () => {
+    const active = document("project-1", 0);
+    const archivedNote = { ...document(null, 1), archived_at: "2026-10-11T00:00:00.000Z" };
+    const archivedProject: NoteProject = {
+      id: "project-1", owner_id: "owner", name: "Archived", sort_order: 0,
+      collapsed: false, archived_at: "2026-10-11T00:00:00.000Z",
+      created_at: "2026-09-14T00:00:00.000Z", updated_at: "2026-09-14T00:00:00.000Z",
+    };
+
+    expect(isAvailableDocument(active, [archivedProject])).toBe(false);
+    expect(isAvailableDocument(archivedNote, [])).toBe(false);
+    expect(isAvailableDocument(document(null, 2), [archivedProject])).toBe(true);
   });
 });

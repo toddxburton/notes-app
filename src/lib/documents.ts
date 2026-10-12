@@ -1,4 +1,9 @@
-import type { NoteDocument } from "../types";
+import type { NoteDocument, NoteProject } from "../types";
+
+export function isAvailableDocument(document: NoteDocument, projects: NoteProject[]): boolean {
+  return !document.deleted_at && !document.archived_at
+    && !projects.some((project) => project.id === document.project_id && Boolean(project.archived_at));
+}
 
 export function nextTopSortOrder(
   documents: NoteDocument[],

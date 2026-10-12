@@ -1,4 +1,6 @@
 export interface WebMcpApi {
+  listProjects: (query?: string, includeArchived?: boolean) => Promise<unknown>;
+  createProject: (name: string) => Promise<unknown>;
   listDocuments: (query?: string, limit?: number) => Promise<unknown>;
   getDocument: (documentId: string) => Promise<unknown>;
   openDocument: (documentId: string) => Promise<unknown>;
@@ -33,8 +35,27 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
 
   await Promise.all([
     register({
+      name: "list_projects",
+      description: "List Noted projects by name and ID so notes can be understood in their workspace context.",
+      inputSchema: { type: "object", properties: {
+        query: { type: "string", maxLength: 200 },
+        include_archived: { type: "boolean", default: false },
+      }, additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input) => api.listProjects(text(input, "query") || undefined, Boolean(input.include_archived)),
+    }),
+    register({
+      name: "create_project",
+      description: "Create a project in this signed-in Noted workspace.",
+      inputSchema: { type: "object", properties: {
+        name: { type: "string", minLength: 1, maxLength: 180 },
+      }, required: ["name"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.createProject(text(input, "name")),
+    }),
+    register({
       name: "list_documents",
-      description: "List documents in this signed-in Notes workspace. Optionally match titles or text and return short snippets.",
+      description: "List documents in this signed-in Noted workspace with each note's project name and ID. Optionally match note titles, text, or project names and return short snippets.",
       inputSchema: { type: "object", properties: {
         query: { type: "string", maxLength: 200 },
         limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
@@ -44,14 +65,14 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
     }),
     register({
       name: "get_document",
-      description: "Get one Notes document as stable rich-text JSON and plain text, with its comment context.",
+      description: "Get one Noted document as stable rich-text JSON and plain text, with its comment context.",
       inputSchema: { type: "object", properties: { document_id: { type: "string" } }, required: ["document_id"], additionalProperties: false },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
       execute: (input) => api.getDocument(text(input, "document_id")),
     }),
     register({
       name: "open_document",
-      description: "Open an existing note by ID in the Notes editor.",
+      description: "Open an existing note by ID in the Noted editor.",
       inputSchema: { type: "object", properties: { document_id: { type: "string", minLength: 1 } }, required: ["document_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.openDocument(text(input, "document_id")),
@@ -69,7 +90,7 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
     }),
     register({
       name: "update_document",
-      description: "Rename or update one Notes document. Replace or append Markdown/plain text; every change creates a revision.",
+      description: "Rename or update one Noted document. Replace or append Markdown/plain text; every change creates a revision.",
       inputSchema: { type: "object", properties: {
         document_id: { type: "string", minLength: 1 },
         title: { type: "string", minLength: 1, maxLength: 180 },
@@ -110,7 +131,7 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
     }),
     register({
       name: "reply_to_comment",
-      description: "Append an agent reply to an existing Notes comment thread.",
+      description: "Append an agent reply to an existing Noted comment thread.",
       inputSchema: { type: "object", properties: {
         comment_id: { type: "string" }, body: { type: "string", minLength: 1, maxLength: 10000 },
         agent_name: { type: "string", default: "Codex", maxLength: 40 },
@@ -120,14 +141,14 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
     }),
     register({
       name: "resolve_comment",
-      description: "Mark a Notes comment thread as resolved.",
+      description: "Mark a Noted comment thread as resolved.",
       inputSchema: { type: "object", properties: { comment_id: { type: "string" } }, required: ["comment_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.setCommentStatus(text(input, "comment_id"), "resolved"),
     }),
     register({
       name: "reopen_comment",
-      description: "Reopen a resolved Notes comment thread.",
+      description: "Reopen a resolved Noted comment thread.",
       inputSchema: { type: "object", properties: { comment_id: { type: "string" } }, required: ["comment_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.setCommentStatus(text(input, "comment_id"), "open"),

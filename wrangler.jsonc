@@ -18,6 +18,10 @@
   },
   "routes": [
     {
+      "pattern": "noted.toddxburton.com",
+      "custom_domain": true
+    },
+    {
       "pattern": "notes.toddxburton.com",
       "custom_domain": true
     }

@@ -13,6 +13,8 @@ describe("WebMCP registration", () => {
     };
     const noop = vi.fn(async () => ({}));
     const api: WebMcpApi = {
+      listProjects: noop,
+      createProject: noop,
       listDocuments: noop,
       getDocument: noop,
       openDocument: noop,
@@ -33,10 +35,12 @@ describe("WebMCP registration", () => {
       "add_comment",
       "complete_notification",
       "create_document",
+      "create_project",
       "get_document",
       "list_comments",
       "list_documents",
       "list_notifications",
+      "list_projects",
       "open_document",
       "reopen_comment",
       "reply_to_comment",

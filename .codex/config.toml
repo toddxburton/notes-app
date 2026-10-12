@@ -1,3 +1,3 @@
-[mcp_servers.notes]
-url = "https://notes.toddxburton.com/mcp"
-bearer_token_env_var = "NOTES_MCP_TOKEN"
+[mcp_servers.noted]
+url = "https://noted.toddxburton.com/mcp"
+http_headers_helper = "/Users/toddburton/Projects/notes-app/scripts/noted-mcp-headers.sh"

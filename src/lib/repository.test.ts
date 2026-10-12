@@ -4,12 +4,15 @@ import {
   createBackup,
   createComment,
   createDocument,
+  createProject,
   loadWorkspace,
   markNotificationsRead,
   replyToComment,
   saveDocumentDraft,
   updateDocument,
   updateDocumentLayout,
+  updateProject,
+  updateProjectLayout,
   updateNotification,
 } from "./repository";
 
@@ -64,6 +67,34 @@ describe("local workspace repository", () => {
     expect(workspace.documents.find((document) => document.id === second.id)).toMatchObject({
       project_id: "project-1",
       sort_order: 0,
+    });
+  });
+
+  it("persists project order, collapsed state, and archives", async () => {
+    const first = await createProject(null, "First", 0);
+    const second = await createProject(null, "Second", 1);
+
+    await updateProjectLayout(null, [
+      { id: second.id, sort_order: 0 },
+      { id: first.id, sort_order: 1 },
+    ]);
+    await updateProject(null, first.id, { collapsed: true, archived_at: new Date().toISOString() });
+
+    const workspace = await loadWorkspace(null);
+    expect(workspace.projects).toMatchObject([
+      { id: first.id, sort_order: 1, collapsed: true, archived_at: expect.any(String) },
+      { id: second.id, sort_order: 0, collapsed: false, archived_at: null },
+    ]);
+  });
+
+  it("keeps archived notes in the workspace so they can be restored", async () => {
+    const content = { type: "doc", content: [{ type: "paragraph" }] };
+    const created = await createDocument(null, "Archive me", content, "");
+    await updateDocument(null, created.id, { archived_at: new Date().toISOString() });
+
+    expect((await loadWorkspace(null)).documents[0]).toMatchObject({
+      id: created.id,
+      archived_at: expect.any(String),
     });
   });
 

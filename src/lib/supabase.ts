@@ -26,7 +26,7 @@ export async function sendMagicLink(email: string): Promise<void> {
   if (!supabase) throw new Error("Supabase is not configured.");
   const { error } = await supabase.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: window.location.origin },
+    options: { emailRedirectTo: window.location.origin, shouldCreateUser: false },
   });
   if (error) throw error;
 }
