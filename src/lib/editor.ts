@@ -7,6 +7,7 @@ import { generateHTML, generateJSON } from "@tiptap/html";
 import StarterKit from "@tiptap/starter-kit";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { InlineDatabase } from "./database";
 
 export const CommentAnchor = Mark.create({
   name: "commentAnchor",
@@ -39,6 +40,7 @@ export const editorExtensions = [
   TaskItem.configure({ nested: true }),
   Placeholder.configure({ placeholder: "Start writing…" }),
   CommentAnchor,
+  InlineDatabase,
 ];
 
 export function markdownToContent(markdown: string): JSONContent {
@@ -78,6 +80,16 @@ export function contentToPlainText(content: JSONContent): string {
   ]);
   function visit(node: JSONContent): string {
     if (node.type === "text") return node.text ?? "";
+    if (node.type === "inlineDatabase") {
+      const title = String(node.attrs?.title ?? "Untitled database");
+      const columns = (node.attrs?.columns ?? []) as { id: string; name: string }[];
+      const rows = (node.attrs?.rows ?? []) as { cells: Record<string, string | string[]> }[];
+      return `${title}\n${columns.map((column) => column.name).join("\t")}\n${rows.map((row) =>
+        columns.map((column) => {
+          const value = row.cells[column.id];
+          return Array.isArray(value) ? value.join(", ") : value ?? "";
+        }).join("\t")).join("\n")}\n`;
+    }
     const nested = (node.content ?? []).map(visit).join("");
     return blockTypes.has(node.type ?? "") ? `${nested}\n` : nested;
   }

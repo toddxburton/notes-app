@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "VITE_SUPABASE_URL= VITE_SUPABASE_PUBLISHABLE_KEY= vite",
     "worker:types": "wrangler types",
     "build": "npm run worker:types && tsc -b && vite build",
     "preview": "vite preview",

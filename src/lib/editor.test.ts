@@ -21,4 +21,15 @@ describe("editor content conversion", () => {
     expect(content.content).toHaveLength(2);
     expect(contentToPlainText(content)).toBe("First paragraph.\nSecond paragraph.");
   });
+
+  it("includes database titles, columns, and row values in searchable text", () => {
+    expect(contentToPlainText({ type: "doc", content: [{
+      type: "inlineDatabase",
+      attrs: {
+        title: "Planning",
+        columns: [{ id: "name", name: "Item Name" }, { id: "tags", name: "Tags" }],
+        rows: [{ cells: { name: "Launch", tags: ["Ready", "Priority"] } }],
+      },
+    }] })).toBe("Planning\nItem Name\tTags\nLaunch\tReady, Priority");
+  });
 });

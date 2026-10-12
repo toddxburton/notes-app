@@ -8,6 +8,7 @@ import {
   ArchiveRestore,
   Bell,
   Braces,
+  Database,
   Check,
   CheckSquare,
   ChevronDown,
@@ -672,7 +673,7 @@ export default function App() {
     const documentId = activeIdRef.current;
     if (!documentId) return;
     const contentJson = currentEditor.getJSON();
-    const plainText = currentEditor.getText({ blockSeparator: "\n\n" });
+    const plainText = contentToPlainText(contentJson);
     applyLocalDocumentUpdate(documentId, { content_json: contentJson, plain_text: plainText });
     scheduleSave(documentId, { content_json: contentJson, plain_text: plainText });
   };
@@ -1736,6 +1737,7 @@ export default function App() {
                       >
                         <span className={`slash-command-icon ${option.id}`}>
                           {option.id === "checklist" ? <CheckSquare size={17} />
+                            : option.id === "database" ? <Database size={17} />
                             : option.id === "quote" ? <Quote size={17} />
                               : option.id === "paragraph" ? "T"
                                 : option.id.replace("heading-", "H")}

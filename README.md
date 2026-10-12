@@ -12,6 +12,8 @@ npm run dev
 
 Without Supabase environment variables, the app runs in local preview mode and stores data in the browser. A deployed build should always provide both variables.
 
+To test locally without signing in, run `npm run dev:local`. This command overrides the local Supabase settings for that dev server only. Preview notes stay in that browser's local storage and do not sync to Supabase.
+
 ## Supabase
 
 Create or link a Supabase project, then apply the checked-in migration:

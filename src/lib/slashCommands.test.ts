@@ -73,4 +73,18 @@ describe("slash commands", () => {
     });
     editor.destroy();
   });
+
+  it("inserts a database block with an editable paragraph after it", () => {
+    const editor = new Editor({
+      extensions: editorExtensions,
+      content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "/database" }] }] },
+    });
+    editor.commands.setTextSelection(10);
+    const match = getSlashCommandMatch(editor);
+
+    expect(applySlashCommand(editor, "database", match!)).toBe(true);
+    expect(editor.getJSON().content?.map((node) => node.type)).toEqual(["inlineDatabase", "paragraph"]);
+    expect(editor.getJSON().content?.[0].attrs?.columns?.[0]).toMatchObject({ name: "Item Name", type: "itemName" });
+    editor.destroy();
+  });
 });

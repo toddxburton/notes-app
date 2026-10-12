@@ -410,7 +410,7 @@ body.is-resizing-sidebar { cursor: col-resize; user-select: none; }
 
 .style-select { position: relative; width: 89px; height: 32px; display: flex; align-items: center; }
 .style-select select { width: 100%; height: 100%; border: 0; background: transparent; appearance: none; padding: 0 28px 0 4px; color: #666661; font-size: 12px; outline: 0; }
-.style-select svg { position: absolute; right: 8px; pointer-events: none; color: #777; }
+.style-select svg { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); pointer-events: none; color: #777; }
 .toolbar-divider { width: 1px; height: 23px; margin: 0 7px; background: var(--border); }
 .toolbar-spacer { flex: 1; }
 
@@ -466,6 +466,50 @@ body.is-resizing-sidebar { cursor: col-resize; user-select: none; }
   vertical-align: super;
 }
 .document-body p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: #b8b8b3; float: left; height: 0; pointer-events: none; }
+.inline-database { margin: 28px 0 34px; white-space: normal; font-size: 13px; line-height: 1.4; }
+.database-shell { position: relative; }
+.database-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.inline-database .database-title { flex: 1; min-width: 0; border: 0; padding: 4px 0; outline: 0; background: transparent; color: #242421; font-size: 19px; font-weight: 650; line-height: 1.3; font-family: inherit; }
+.inline-database button { font: inherit; cursor: pointer; }
+.database-delete { border: 0; background: transparent; color: #999992; font-size: 11px !important; }
+.database-delete:hover, .database-remove-column:hover { color: #a23939; }
+.database-scroll { overflow-x: auto; border: 1px solid #e8e8e5; border-radius: 7px; }
+.database-table { width: 100%; min-width: 320px; border-collapse: collapse; table-layout: fixed; }
+.database-table th, .database-table td { position: relative; min-width: 150px; height: 37px; padding: 0; border-right: 1px solid #eaeae7; border-bottom: 1px solid #eaeae7; text-align: left; font-weight: 400; }
+.database-table th { background: #fafaf9; color: #777771; }
+.database-table tr:last-child td { border-bottom: 0; }
+.database-table th:last-child, .database-table td:last-child { min-width: 36px; width: 36px; border-right: 0; }
+.database-column-heading > button { width: 100%; min-height: 37px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; background: transparent; text-align: left; padding: 8px 11px; color: #686862; font-weight: 600; }
+.database-column-heading > button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.database-column-heading > button svg { flex: none; color: #999; }
+.database-column-heading > button:hover, .database-add-column button:hover { background: #f2f2ef; }
+.database-popover { position: absolute; z-index: 10; width: min(248px, 100%); box-sizing: border-box; padding: 11px; border: 1px solid #e1e1dd; border-radius: 8px; background: white; box-shadow: 0 10px 28px #0002; }
+.database-popover-label { display: block; margin-bottom: 10px; color: #777; font-size: 11px; font-weight: 600; }
+.database-popover-label small { color: #aaa; font-weight: 400; }
+.database-popover-name, .database-popover select { display: block; width: 100%; box-sizing: border-box; margin-top: 5px; padding: 7px 8px; border: 1px solid #ddd; border-radius: 5px; background: white; color: #333; font: inherit; }
+.database-popover-select { position: relative; display: block; margin-top: 5px; }
+.database-popover-select select { appearance: none; margin-top: 0; padding-right: 34px; }
+.database-popover-select svg { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); color: #555; pointer-events: none; }
+.database-popover-name:focus, .database-popover select:focus { outline: 2px solid #dedaf0; border-color: #b6a8dd; }
+.database-popover-caption { padding: 5px 2px 6px; color: #999; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.database-type-list { max-height: 225px; overflow-y: auto; }
+.database-type-list button { display: block; width: 100%; border: 0; border-radius: 4px; padding: 7px 8px; background: white; color: #363632; text-align: left; }
+.database-type-list button:hover, .database-type-list button:focus-visible { background: #f2f1ef; outline: 0; }
+.database-remove-column { border: 0; background: transparent; color: #777; font-size: 11px !important; padding: 5px 0; }
+.database-table td > input { width: 100%; box-sizing: border-box; height: 36px; border: 0; outline: 0; padding: 7px 10px; background: transparent; color: #333; font: inherit; }
+.database-table td > input:focus, .database-cell-select:focus-within { box-shadow: inset 0 0 0 2px #dedaf0; }
+.database-cell-select { position: relative; display: flex; align-items: center; min-height: 36px; }
+.database-cell-select select { appearance: none; width: 100%; height: 36px; box-sizing: border-box; border: 0; outline: 0; padding: 7px 30px 7px 10px; background: transparent; color: #333; font: inherit; }
+.database-cell-select svg { position: absolute; right: 10px; pointer-events: none; color: #888; }
+.database-multi-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 4px 7px; }
+.database-cell-select-compact { min-height: 26px; max-width: 100px; }
+.database-cell-select-compact select { height: 26px; padding: 2px 24px 2px 4px; color: #777; }
+.database-cell-select-compact svg { right: 4px; }
+.database-tag { border: 0; border-radius: 4px; background: #eeeaf6; color: #5a4c78; padding: 3px 6px; font-size: 11px !important; }
+.database-add-column button, .database-row-actions button { width: 100%; height: 100%; border: 0; background: transparent; color: #9a9a94; }
+.database-row-actions button:hover { color: #a23939; background: #faf3f2; }
+.database-add-row { width: 100%; border: 1px solid #e8e8e5; border-top: 0; border-radius: 0 0 7px 7px; background: white; text-align: left; padding: 9px 12px; color: #888; }
+.database-add-row:hover { background: #fafaf9; color: #555; }
 .slash-command-menu {
   position: absolute;
   z-index: 15;

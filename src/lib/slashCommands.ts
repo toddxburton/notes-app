@@ -1,6 +1,7 @@
 import type { Editor } from "@tiptap/core";
+import { newDatabase } from "./database";
 
-export type SlashCommandId = "paragraph" | "heading-1" | "heading-2" | "heading-3" | "checklist" | "quote";
+export type SlashCommandId = "paragraph" | "heading-1" | "heading-2" | "heading-3" | "checklist" | "quote" | "database";
 
 export type SlashCommandOption = {
   id: SlashCommandId;
@@ -16,6 +17,12 @@ export type SlashCommandMatch = {
 };
 
 export const slashCommandOptions: SlashCommandOption[] = [
+  {
+    id: "database",
+    label: "Database",
+    description: "Add an editable table of items",
+    keywords: ["table", "columns", "rows", "properties"],
+  },
   {
     id: "paragraph",
     label: "Body text",
@@ -97,5 +104,7 @@ export function applySlashCommand(
       return chain.toggleTaskList().run();
     case "quote":
       return chain.toggleBlockquote().run();
+    case "database":
+      return chain.insertContent([{ type: "inlineDatabase", attrs: newDatabase() }, { type: "paragraph" }]).run();
   }
 }
