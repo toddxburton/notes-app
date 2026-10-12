@@ -192,10 +192,17 @@ function createNotedServer(env: Env) {
       annotations: { readOnlyHint: true },
     },
     ({ query, limit }) => guarded(async () => {
+      const activeProjectsResult = await client.from("projects").select("id")
+        .eq("owner_id", ownerId).is("archived_at", null);
+      ensureNoError(activeProjectsResult.error);
+      const activeProjectIds = (activeProjectsResult.data ?? []).map((project) => project.id);
       let request = client.from("documents")
         .select("id,title,plain_text,revision,updated_at,project_id,sort_order")
         .eq("owner_id", ownerId).is("deleted_at", null).is("archived_at", null)
         .order("updated_at", { ascending: false }).limit(limit);
+      request = activeProjectIds.length
+        ? request.or(`project_id.is.null,project_id.in.(${activeProjectIds.join(",")})`)
+        : request.is("project_id", null);
       if (query?.trim()) {
         const escaped = query.trim().replace(/[,%()]/g, " ");
         const projectResult = await client.from("projects").select("id")
@@ -209,7 +216,7 @@ function createNotedServer(env: Env) {
       const result = await request;
       ensureNoError(result.error);
       const projects = await getProjectSummaries(client, ownerId, (result.data ?? []).map((document) => document.project_id));
-      return (result.data ?? []).filter((document) => !document.project_id || !projects.get(document.project_id)?.archived_at).map((document) => ({
+      return (result.data ?? []).map((document) => ({
         ...document,
         snippet: document.plain_text.slice(0, 320),
         plain_text: undefined,
@@ -231,7 +238,8 @@ function createNotedServer(env: Env) {
       ensureNoError(documentResult.error);
       if (!documentResult.data) throw new Error("Document not found.");
       const projects = await getProjectSummaries(client, ownerId, [documentResult.data.project_id]);
-      if (documentResult.data.project_id && projects.get(documentResult.data.project_id)?.archived_at) {
+      if (documentResult.data.project_id && (!projects.has(documentResult.data.project_id)
+        || projects.get(documentResult.data.project_id)?.archived_at)) {
         throw new Error("Document not found.");
       }
       const commentsResult = await client.from("comments").select("*")
@@ -302,12 +310,19 @@ function createNotedServer(env: Env) {
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     ({ document_id, title, content_json, plain_text }) => guarded(async () => {
+      const existing = await client.from("documents").select("project_id")
+        .eq("owner_id", ownerId).eq("id", document_id)
+        .is("deleted_at", null).is("archived_at", null).maybeSingle();
+      ensureNoError(existing.error);
+      if (!existing.data) throw new Error("Document not found.");
+      if (existing.data.project_id) await getActiveProject(client, ownerId, existing.data.project_id);
       const updates = {
         ...(title !== undefined ? { title } : {}),
         ...(content_json !== undefined ? { content_json, plain_text } : {}),
       };
       const result = await client.from("documents").update(updates)
-        .eq("owner_id", ownerId).eq("id", document_id).is("deleted_at", null)
+        .eq("owner_id", ownerId).eq("id", document_id)
+        .is("deleted_at", null).is("archived_at", null)
         .select().maybeSingle();
       ensureNoError(result.error);
       if (!result.data) throw new Error("Document not found.");

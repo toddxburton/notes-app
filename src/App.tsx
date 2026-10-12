@@ -46,7 +46,7 @@ import {
   type SlashCommandId,
   type SlashCommandMatch,
 } from "./lib/slashCommands";
-import { nextTopSortOrder } from "./lib/documents";
+import { isAvailableDocument, nextTopSortOrder } from "./lib/documents";
 import {
   clearDocumentDraft,
   createBackup,
@@ -258,6 +258,7 @@ export default function App() {
   const saveTimer = useRef<number | null>(null);
   const refreshing = useRef(false);
   const pendingUpdates = useRef(new Map<string, DocumentUpdates>());
+  const saveInFlight = useRef<Promise<void> | null>(null);
   const editorDocumentId = useRef<string | null>(null);
   const commentCardRefs = useRef(new Map<string, HTMLElement>());
   const documentPageRef = useRef<HTMLElement | null>(null);
@@ -400,8 +401,8 @@ export default function App() {
   };
 
   const activeDocument = useMemo(
-    () => documents.find((document) => document.id === activeId && !document.archived_at) ?? null,
-    [documents, activeId],
+    () => documents.find((document) => document.id === activeId && isAvailableDocument(document, projects)) ?? null,
+    [documents, activeId, projects],
   );
 
   const workspaceData = useCallback((): WorkspaceData => ({
@@ -448,9 +449,7 @@ export default function App() {
       setReplies(data.replies);
       setNotifications(data.notifications);
       setDisplayName(data.displayName);
-      const archivedProjectIds = new Set(data.projects.filter((project) => project.archived_at).map((project) => project.id));
-      const availableDocuments = data.documents.filter((item) =>
-        !item.archived_at && !archivedProjectIds.has(item.project_id ?? ""));
+      const availableDocuments = data.documents.filter((item) => isAvailableDocument(item, data.projects));
       const rememberedId = localStorage.getItem(lastViewedDocumentKey(userIdRef.current));
       setActiveId((current) => current && availableDocuments.some((item) => item.id === current)
         ? current
@@ -583,49 +582,58 @@ export default function App() {
   }, [activeId, commentFilter, comments, commentsOpen, focusedCommentId]);
 
   const flushPendingSave = useCallback(async () => {
+    if (saveInFlight.current) await saveInFlight.current;
     const entries = [...pendingUpdates.current.entries()];
     if (!entries.length) return;
-    entries.forEach(([documentId]) => pendingUpdates.current.delete(documentId));
-    setSaveState("saving");
-    const results = await Promise.allSettled(entries.map(([documentId, updates]) =>
-      updateDocument(userIdRef.current, documentId, updates)));
-    const savedDocuments = new Map<string, NoteDocument>();
-    const failures: string[] = [];
+    const save = (async () => {
+      entries.forEach(([documentId]) => pendingUpdates.current.delete(documentId));
+      setSaveState("saving");
+      const results = await Promise.allSettled(entries.map(([documentId, updates]) =>
+        updateDocument(userIdRef.current, documentId, updates)));
+      const savedDocuments = new Map<string, NoteDocument>();
+      const failures: string[] = [];
 
-    results.forEach((result, index) => {
-      const [documentId, submitted] = entries[index];
-      if (result.status === "fulfilled") {
-        savedDocuments.set(documentId, result.value);
-        return;
-      }
-      const newer = pendingUpdates.current.get(documentId);
-      pendingUpdates.current.set(documentId, { ...submitted, ...newer });
-      failures.push(result.reason instanceof Error ? result.reason.message : "Unable to save this note.");
-    });
-
-    setDocuments((current) => {
-      const next = current.map((document) => {
-        const saved = savedDocuments.get(document.id);
-        if (!saved || pendingUpdates.current.has(document.id)) return document;
-        clearDocumentDraft(document.id);
-        return saved;
+      results.forEach((result, index) => {
+        const [documentId, submitted] = entries[index];
+        if (result.status === "fulfilled") {
+          savedDocuments.set(documentId, result.value);
+          return;
+        }
+        const newer = pendingUpdates.current.get(documentId);
+        pendingUpdates.current.set(documentId, { ...submitted, ...newer });
+        failures.push(result.reason instanceof Error ? result.reason.message : "Unable to save this note.");
       });
-      documentsRef.current = next;
-      return next;
-    });
 
-    if (failures.length) {
-      setSaveState("error");
-      setError(failures[0]);
-    } else if (pendingUpdates.current.size) {
-      setSaveState("pending");
-    } else {
-      setSaveState("saved");
-    }
+      setDocuments((current) => {
+        const next = current.map((document) => {
+          const saved = savedDocuments.get(document.id);
+          if (!saved || pendingUpdates.current.has(document.id)) return document;
+          clearDocumentDraft(document.id);
+          return saved;
+        });
+        documentsRef.current = next;
+        return next;
+      });
 
-    if (pendingUpdates.current.size) {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+      if (failures.length) {
+        setSaveState("error");
+        setError(failures[0]);
+      } else if (pendingUpdates.current.size) {
+        setSaveState("pending");
+      } else {
+        setSaveState("saved");
+      }
+
+      if (pendingUpdates.current.size) {
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+      }
+    })();
+    saveInFlight.current = save;
+    try {
+      await save;
+    } finally {
+      if (saveInFlight.current === save) saveInFlight.current = null;
     }
   }, []);
 
@@ -879,13 +887,23 @@ export default function App() {
   async function handleArchiveDocument(document: NoteDocument) {
     if (!window.confirm(`Archive “${document.title}”? You can restore it from Archived.`)) return;
     try {
+      await flushPendingSave();
+      if (pendingUpdates.current.has(document.id)) {
+        throw new Error("Save this note before archiving it.");
+      }
       const archivedAt = new Date().toISOString();
-      const updated = await updateDocument(userId, document.id, { archived_at: archivedAt });
+      const latest = documentsRef.current.find((item) => item.id === document.id) ?? document;
+      const updated = await updateDocument(userId, document.id, {
+        title: latest.title,
+        content_json: latest.content_json,
+        plain_text: latest.plain_text,
+        archived_at: archivedAt,
+      });
       pendingUpdates.current.delete(document.id);
       clearDocumentDraft(document.id);
       setDocuments((current) => current.map((item) => item.id === document.id ? updated : item));
       if (activeId === document.id) {
-        setActiveId(documents.find((item) => item.id !== document.id && !item.archived_at)?.id ?? null);
+        setActiveId(documents.find((item) => item.id !== document.id && isAvailableDocument(item, projectsRef.current))?.id ?? null);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to archive this note.");
@@ -896,7 +914,7 @@ export default function App() {
     try {
       const updated = await updateDocument(userId, document.id, { archived_at: null });
       setDocuments((current) => current.map((item) => item.id === document.id ? updated : item));
-      if (!projectsRef.current.find((project) => project.id === updated.project_id)?.archived_at) {
+      if (isAvailableDocument(updated, projectsRef.current)) {
         setActiveId(updated.id);
         setMobileRailOpen(false);
       }
@@ -911,7 +929,7 @@ export default function App() {
       const updated = await updateProject(userId, project.id, { archived_at: new Date().toISOString() });
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
       if (activeDocument?.project_id === project.id) {
-        setActiveId(documents.find((item) => item.project_id !== project.id && !item.archived_at)?.id ?? null);
+        setActiveId(documents.find((item) => item.project_id !== project.id && isAvailableDocument(item, projectsRef.current))?.id ?? null);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to archive this project.");
@@ -1089,7 +1107,7 @@ export default function App() {
       const normalized = search?.toLowerCase();
       const projectById = new Map(projectsRef.current.map((project) => [project.id, project]));
       return documentsRef.current
-        .filter((item) => !item.archived_at && !projectById.get(item.project_id ?? "")?.archived_at)
+        .filter((item) => isAvailableDocument(item, projectsRef.current))
         .filter((item) => !normalized || `${item.title}\n${item.plain_text}\n${projectById.get(item.project_id ?? "")?.name ?? ""}`.toLowerCase().includes(normalized))
         .slice(0, Math.min(limit, 100))
         .map((item) => ({
@@ -1106,7 +1124,7 @@ export default function App() {
     },
     getDocument: async (documentId) => {
       const note = documentsRef.current.find((item) => item.id === documentId);
-      if (!note || note.archived_at) throw new Error("Document not found.");
+      if (!note || !isAvailableDocument(note, projectsRef.current)) throw new Error("Document not found.");
       const project = note.project_id ? projectsRef.current.find((item) => item.id === note.project_id) : null;
       const threads = commentsRef.current.filter((item) => item.document_id === documentId);
       return { ...note, project: project ? { id: project.id, name: project.name } : null, comments: threads.map((thread) => ({
@@ -1116,7 +1134,7 @@ export default function App() {
     },
     openDocument: async (documentId) => {
       const note = documentsRef.current.find((item) => item.id === documentId);
-      if (!note) throw new Error("Document not found.");
+      if (!note || !isAvailableDocument(note, projectsRef.current)) throw new Error("Document not found.");
       setActiveId(documentId);
       return { opened: true, document_id: documentId, title: note.title };
     },
@@ -1132,7 +1150,7 @@ export default function App() {
     },
     updateDocument: async ({ documentId, title, content, format, mode }) => {
       const existing = documentsRef.current.find((item) => item.id === documentId);
-      if (!existing) throw new Error("Document not found.");
+      if (!existing || !isAvailableDocument(existing, projectsRef.current)) throw new Error("Document not found.");
       let contentJson = existing.content_json;
       if (content !== undefined) {
         const incoming = inputToContent(content, format);
@@ -1261,9 +1279,8 @@ export default function App() {
   const activeProjects = projects
     .filter((project) => !project.archived_at)
     .sort((first, second) => (first.sort_order ?? 0) - (second.sort_order ?? 0));
-  const archivedProjectIds = new Set(projects.filter((project) => project.archived_at).map((project) => project.id));
   const archivedProjects = projects.filter((project) => Boolean(project.archived_at));
-  const activeDocuments = documents.filter((document) => !document.archived_at && !archivedProjectIds.has(document.project_id ?? ""));
+  const activeDocuments = documents.filter((document) => isAvailableDocument(document, projects));
   const archivedDocuments = documents.filter((document) => Boolean(document.archived_at));
   const visibleDocuments = activeDocuments.filter((document) => {
     const normalized = query.trim().toLowerCase();
