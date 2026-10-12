@@ -24,7 +24,7 @@ export function newDatabase() {
       { id: crypto.randomUUID(), name: "Item Name", type: "itemName", options: [] },
       ...[1, 2, 3].map((number) => ({ id: crypto.randomUUID(), name: `Text ${number}`, type: "text" as const, options: [] })),
     ] as DatabaseColumn[],
-    rows: [] as DatabaseRow[],
+    rows: [{ id: crypto.randomUUID(), cells: {} }] as DatabaseRow[],
   };
 }
 
