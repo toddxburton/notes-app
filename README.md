@@ -2,6 +2,14 @@
 
 Noted is a private React writing workspace for `noted.toddxburton.com`. It synchronizes through Supabase and exposes browser WebMCP tools plus an authenticated remote MCP endpoint so Codex can read documents, edit them, and work with comment threads and @mention notifications. The previous `notes.toddxburton.com` hostname remains available as a compatibility alias.
 
+## Based
+
+Click the Noted logo to switch to Based, the companion database workspace. Click the Based logo to return to notes. Based databases live in their own sidebar with folders; each database has table tabs and a full-width editable grid. The two tools share sign-in and visual styling but store their data separately. Existing inline database blocks in Noted remain available.
+
+Based supports text, number, date, select, multiselect, URL, checkbox, and two-way linked-record columns. The reciprocal linked column starts visible and can be hidden independently. Tables support search, filter, sort, group, column sizing, text wrap, and pages of 100 records. Records, columns, tables, folders, and databases can be archived and restored without deleting their data.
+
+Based has a separate JSON export/import flow and daily cloud snapshots. Import replaces only Based data. The `based_workspace` migration must be applied before using Based with Supabase; local preview mode stores Based data under a separate browser storage key. Browser and remote MCP endpoints expose Based discovery, schema creation, record queries and edits, and links.
+
 ## Local development
 
 ```sh

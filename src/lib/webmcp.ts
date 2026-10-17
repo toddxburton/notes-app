@@ -19,6 +19,15 @@ export interface WebMcpApi {
   listNotifications: (recipient?: string, state?: "unread" | "pending" | "planned" | "completed" | "all") => Promise<unknown>;
   acknowledgeNotification: (notificationId: string, planId: string) => Promise<unknown>;
   completeNotification: (notificationId: string) => Promise<unknown>;
+  listBasedDatabases: () => Promise<unknown>;
+  getBasedDatabase: (databaseId: string) => Promise<unknown>;
+  queryBasedRecords: (tableId: string, offset: number, limit: number, search: string) => Promise<unknown>;
+  createBasedDatabase: (name: string) => Promise<unknown>;
+  createBasedTable: (databaseId: string, name: string) => Promise<unknown>;
+  createBasedField: (tableId: string, name: string, type: string, targetTableId?: string) => Promise<unknown>;
+  createBasedRecord: (tableId: string, cells: Record<string, unknown>) => Promise<unknown>;
+  updateBasedRecord: (recordId: string, cells: Record<string, unknown>) => Promise<unknown>;
+  setBasedLink: (relationId: string, leftRecordId: string, rightRecordId: string, linked: boolean) => Promise<unknown>;
 }
 
 function text(input: Record<string, unknown>, key: string, fallback = "") {
@@ -184,6 +193,60 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
       }, required: ["notification_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.completeNotification(text(input, "notification_id")),
+    }),
+    register({
+      name: "list_based_databases", description: "List Based databases, folders, and tables.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: () => api.listBasedDatabases(),
+    }),
+    register({
+      name: "get_based_database", description: "Get a Based database with its tables, fields, and linked-field relationships.",
+      inputSchema: { type: "object", properties: { database_id: { type: "string" } }, required: ["database_id"], additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input) => api.getBasedDatabase(text(input, "database_id")),
+    }),
+    register({
+      name: "query_based_records", description: "Page through Based records, optionally searching cell values.",
+      inputSchema: { type: "object", properties: { table_id: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 }, search: { type: "string", maxLength: 200 } }, required: ["table_id"], additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input) => api.queryBasedRecords(text(input, "table_id"), Number(input.offset ?? 0), Number(input.limit ?? 100), text(input, "search")),
+    }),
+    register({
+      name: "create_based_database", description: "Create a Based database with its first table.",
+      inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 180 } }, required: ["name"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.createBasedDatabase(text(input, "name")),
+    }),
+    register({
+      name: "create_based_table", description: "Create a table in a Based database.",
+      inputSchema: { type: "object", properties: { database_id: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 180 } }, required: ["database_id", "name"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.createBasedTable(text(input, "database_id"), text(input, "name")),
+    }),
+    register({
+      name: "create_based_field", description: "Add a typed column. Linked records require a target table in the same database.",
+      inputSchema: { type: "object", properties: { table_id: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 180 }, type: { type: "string", enum: ["text", "number", "date", "singleSelect", "multiSelect", "url", "checkbox", "linkedRecord"] }, target_table_id: { type: "string" } }, required: ["table_id", "name", "type"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.createBasedField(text(input, "table_id"), text(input, "name"), text(input, "type"), text(input, "target_table_id") || undefined),
+    }),
+    register({
+      name: "create_based_record", description: "Create a row with values keyed by field ID.",
+      inputSchema: { type: "object", properties: { table_id: { type: "string" }, cells: { type: "object" } }, required: ["table_id"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.createBasedRecord(text(input, "table_id"), (input.cells ?? {}) as Record<string, unknown>),
+    }),
+    register({
+      name: "update_based_record", description: "Update values in a Based row by field ID.",
+      inputSchema: { type: "object", properties: { record_id: { type: "string" }, cells: { type: "object" } }, required: ["record_id", "cells"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.updateBasedRecord(text(input, "record_id"), input.cells as Record<string, unknown>),
+    }),
+    register({
+      name: "set_based_link", description: "Create or remove a two-way record link.",
+      inputSchema: { type: "object", properties: { relation_id: { type: "string" }, left_record_id: { type: "string" }, right_record_id: { type: "string" }, linked: { type: "boolean" } }, required: ["relation_id", "left_record_id", "right_record_id", "linked"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.setBasedLink(text(input, "relation_id"), text(input, "left_record_id"), text(input, "right_record_id"), Boolean(input.linked)),
     }),
   ]);
   return true;

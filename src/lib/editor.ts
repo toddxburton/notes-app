@@ -1,9 +1,11 @@
-import { Mark, mergeAttributes, type JSONContent } from "@tiptap/core";
+import { Extension, Mark, mergeAttributes, type Editor, type JSONContent } from "@tiptap/core";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import { generateHTML, generateJSON } from "@tiptap/html";
+import { closeHistory } from "@tiptap/pm/history";
+import { Selection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -33,8 +35,24 @@ export const CommentAnchor = Mark.create({
   },
 });
 
+const ParagraphLineBreaks = Extension.create({
+  name: "paragraphLineBreaks",
+  priority: 1000,
+  addKeyboardShortcuts() {
+    const inBodyParagraph = () => {
+      const { $from, $to } = this.editor.state.selection;
+      return $from.depth === 1 && $from.sameParent($to) && $from.parent.type.name === "paragraph";
+    };
+    return {
+      Enter: () => inBodyParagraph() && this.editor.commands.setHardBreak(),
+      "Shift-Enter": () => inBodyParagraph() && this.editor.commands.splitBlock(),
+    };
+  },
+});
+
 export const editorExtensions = [
   StarterKit.configure({ link: false }),
+  ParagraphLineBreaks,
   Link.configure({ openOnClick: false, autolink: true }),
   TaskList,
   TaskItem.configure({ nested: true }),
@@ -42,6 +60,46 @@ export const editorExtensions = [
   CommentAnchor,
   InlineDatabase,
 ];
+
+export function changeSelectedBlock(editor: Editor, value: string): boolean {
+  const chain = editor.chain().focus();
+  const activeList = editor.isActive("bulletList") ? "bulletList" : editor.isActive("orderedList") ? "orderedList" : editor.isActive("taskList") ? "taskList" : null;
+  const activeQuote = editor.isActive("blockquote");
+  if (activeList && activeList !== value) {
+    if (activeList === "bulletList") chain.toggleBulletList();
+    else if (activeList === "orderedList") chain.toggleOrderedList();
+    else chain.toggleTaskList();
+  }
+  if (activeQuote && value !== "blockquote") chain.toggleBlockquote();
+  if (value === "paragraph" && !activeList) chain.setParagraph();
+  else if (value.startsWith("heading-")) chain.setHeading({ level: Number(value.slice(-1)) as 1 | 2 | 3 });
+  else if (value === "bulletList" && activeList !== value) chain.toggleBulletList();
+  else if (value === "orderedList" && activeList !== value) chain.toggleOrderedList();
+  else if (value === "taskList" && activeList !== value) chain.toggleTaskList();
+  else if (value === "blockquote" && !activeQuote) chain.toggleBlockquote();
+  return chain.run();
+}
+
+export function moveTopLevelBlock(editor: Editor, fromIndex: number, beforeIndex: number): boolean {
+  const { doc } = editor.state;
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(beforeIndex) ||
+      fromIndex < 0 || fromIndex >= doc.childCount ||
+      beforeIndex < 0 || beforeIndex > doc.childCount ||
+      beforeIndex === fromIndex || beforeIndex === fromIndex + 1) return false;
+
+  let from = 0;
+  let destination = 0;
+  for (let index = 0; index < fromIndex; index++) from += doc.child(index).nodeSize;
+  for (let index = 0; index < beforeIndex; index++) destination += doc.child(index).nodeSize;
+
+  const node = doc.child(fromIndex);
+  const insertAt = destination > from ? destination - node.nodeSize : destination;
+  const transaction = closeHistory(editor.state.tr).delete(from, from + node.nodeSize).insert(insertAt, node);
+  transaction.setSelection(Selection.near(transaction.doc.resolve(insertAt + 1)));
+  editor.view.dispatch(transaction.scrollIntoView());
+  editor.view.focus();
+  return true;
+}
 
 export function markdownToContent(markdown: string): JSONContent {
   const rawHtml = marked.parse(markdown, { async: false }) as string;
@@ -64,7 +122,10 @@ export function plainTextToContent(text: string): JSONContent {
   const paragraphs = text.split(/\n{2,}/).map((paragraph) => ({
     type: "paragraph",
     content: paragraph
-      ? [{ type: "text", text: paragraph.replace(/\n/g, " ") }]
+      ? paragraph.split("\n").flatMap((line, index) => [
+        ...(index ? [{ type: "hardBreak" }] : []),
+        ...(line ? [{ type: "text", text: line }] : []),
+      ])
       : undefined,
   }));
   return { type: "doc", content: paragraphs.length ? paragraphs : [{ type: "paragraph" }] };
@@ -80,6 +141,7 @@ export function contentToPlainText(content: JSONContent): string {
   ]);
   function visit(node: JSONContent): string {
     if (node.type === "text") return node.text ?? "";
+    if (node.type === "hardBreak") return "\n";
     if (node.type === "inlineDatabase") {
       const title = String(node.attrs?.title ?? "Untitled database");
       const columns = (node.attrs?.columns ?? []) as { id: string; name: string }[];

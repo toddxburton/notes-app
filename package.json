@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "vite",
     "dev:local": "VITE_SUPABASE_URL= VITE_SUPABASE_PUBLISHABLE_KEY= vite",
-    "worker:types": "wrangler types",
+    "worker:types": "WRANGLER_LOG_PATH=.wrangler/logs wrangler types",
     "build": "npm run worker:types && tsc -b && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && wrangler deploy",
-    "deploy:dry": "npm run build && wrangler deploy --dry-run",
+    "deploy": "npm run build && WRANGLER_LOG_PATH=.wrangler/logs wrangler deploy",
+    "deploy:dry": "npm run build && WRANGLER_LOG_PATH=.wrangler/logs wrangler deploy --dry-run",
     "typecheck": "npm run worker:types && tsc -b",
     "test": "vitest run"
   },

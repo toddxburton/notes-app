@@ -4,7 +4,6 @@ import type { Editor, JSONContent } from "@tiptap/core";
 import type { Session } from "@supabase/supabase-js";
 import {
   Bold,
-  Archive,
   ArchiveRestore,
   Bell,
   Braces,
@@ -12,7 +11,6 @@ import {
   Check,
   CheckSquare,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   Download,
   Ellipsis,
@@ -20,12 +18,12 @@ import {
   GripVertical,
   Italic,
   Link as LinkIcon,
-  List,
-  ListOrdered,
   Maximize2,
   MessageCircle,
   MessageCirclePlus,
   Plus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Quote,
   Redo2,
   Search,
@@ -36,8 +34,10 @@ import {
 } from "lucide-react";
 import {
   contentToPlainText,
+  changeSelectedBlock,
   editorExtensions,
   inputToContent,
+  moveTopLevelBlock,
   welcomeMarkdown,
 } from "./lib/editor";
 import {
@@ -79,6 +79,11 @@ import {
   supabase,
 } from "./lib/supabase";
 import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
+import BasedApp from "./BasedApp";
+import { basedGet, createBasedDatabase, createBasedField, createBasedRecord,
+  createBasedRelation, createBasedTable, loadBasedCatalog, loadBasedRecords, mergeBasedRecordCells, nextBasedRecordOrder, setBasedLink,
+  validateBasedCells } from "./lib/basedRepo";
+import { basedFieldTypes, type BasedRecord } from "./lib/basedTypes";
 import type {
   CommentNotification,
   CommentReply,
@@ -94,11 +99,16 @@ type DocumentUpdates = Partial<Pick<NoteDocument, "title" | "content_json" | "pl
 type SaveState = "saved" | "pending" | "saving" | "error";
 type Selection = { from: number; to: number; quote: string } | null;
 type ProjectDropTarget = { projectId: string; position: "before" | "after" } | null;
+type RailContextMenu = { kind: "project" | "document"; id: string; x: number; y: number } | null;
+type RailActionDialog = { kind: "create-project" | "rename-project" | "rename-document" | "archive-project" | "archive-document"; id?: string; value: string } | null;
 type SlashMenuState = SlashCommandMatch & { top: number; left: number; selectedIndex: number };
+type BlockDropTarget = { beforeIndex: number; top: number };
 
 const defaultRailWidth = 223;
 const railWidthStorageKey = "noted-sidebar-width";
+const railVisibleStorageKey = "noted-sidebar-visible";
 const wideContentStorageKey = "noted-wide-content";
+const nextBasedOrder = (items: Array<{ sort_order: number }>) => Math.max(-1, ...items.map((item) => item.sort_order)) + 1;
 
 function lastViewedDocumentKey(ownerId: string | null | undefined): string {
   return `noted-last-viewed-document-${ownerId ?? "local"}`;
@@ -213,6 +223,8 @@ function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => 
 }
 
 export default function App() {
+  const [tool, setTool] = useState<"noted" | "based">(() => localStorage.getItem("noted-active-tool") === "based" ? "based" : "noted");
+  useEffect(() => { document.title = tool === "based" ? "Based — Databases" : "Noted — Writing with comments"; }, [tool]);
   const [session, setSession] = useState<Session | null | undefined>(isSupabaseConfigured ? undefined : null);
   const [documents, setDocuments] = useState<NoteDocument[]>([]);
   const [projects, setProjects] = useState<NoteProject[]>([]);
@@ -226,6 +238,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [searching, setSearching] = useState(false);
   const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  const [railVisible, setRailVisible] = useState(() => localStorage.getItem(railVisibleStorageKey) !== "false");
   const [query, setQuery] = useState("");
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
@@ -239,7 +252,12 @@ export default function App() {
   const [draggedProject, setDraggedProject] = useState<{ id: string; name: string; x: number; y: number } | null>(null);
   const [projectDropTarget, setProjectDropTarget] = useState<ProjectDropTarget>(null);
   const [projectEndDropTarget, setProjectEndDropTarget] = useState(false);
+  const [railContextMenu, setRailContextMenu] = useState<RailContextMenu>(null);
+  const [railActionDialog, setRailActionDialog] = useState<RailActionDialog>(null);
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  const [blockHandle, setBlockHandle] = useState<{ index: number; top: number } | null>(null);
+  const [blockDropTarget, setBlockDropTarget] = useState<BlockDropTarget | null>(null);
+  const [selectionMenuPosition, setSelectionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [wideContent, setWideContent] = useState(() => localStorage.getItem(wideContentStorageKey) === "true");
   const [railWidth, setRailWidth] = useState(() => {
@@ -263,7 +281,10 @@ export default function App() {
   const editorDocumentId = useRef<string | null>(null);
   const commentCardRefs = useRef(new Map<string, HTMLElement>());
   const documentPageRef = useRef<HTMLElement | null>(null);
+  const draggedBlockRef = useRef<number | null>(null);
+  const blockHandleHideTimer = useRef<number | null>(null);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
+  const railContextMenuRef = useRef<HTMLDivElement | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
   const slashCommandChangeRef = useRef<(editor: Editor, allowOpen: boolean) => void>(() => undefined);
   const slashCommandKeyDownRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
@@ -303,6 +324,44 @@ export default function App() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [toolbarMenuOpen]);
+  useEffect(() => {
+    if (!railContextMenu) return;
+    railContextMenuRef.current?.querySelector("button")?.focus();
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!railContextMenuRef.current?.contains(event.target as Node)) setRailContextMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRailContextMenu(null);
+    };
+    const closeOnScroll = () => setRailContextMenu(null);
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [railContextMenu]);
+  useEffect(() => {
+    if (!railActionDialog) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRailActionDialog(null);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [railActionDialog]);
+  useEffect(() => {
+    if (!selectionMenuPosition) return;
+    const hideOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (documentPageRef.current?.querySelector(".document-body")?.contains(target) ||
+          documentPageRef.current?.querySelector(".selection-toolbar")?.contains(target)) return;
+      setSelectionMenuPosition(null);
+    };
+    document.addEventListener("mousedown", hideOnOutsideClick);
+    return () => document.removeEventListener("mousedown", hideOnOutsideClick);
+  }, [selectionMenuPosition]);
 
   const editorChangeRef = useRef<(editor: Editor) => void>(() => undefined);
   const selectionChangeRef = useRef<(editor: Editor) => void>(() => undefined);
@@ -335,6 +394,82 @@ export default function App() {
       slashCommandChangeRef.current(currentEditor, false);
     },
   });
+
+  useEffect(() => {
+    if (blockHandleHideTimer.current !== null) window.clearTimeout(blockHandleHideTimer.current);
+    blockHandleHideTimer.current = null;
+    draggedBlockRef.current = null;
+    setBlockHandle(null);
+    setBlockDropTarget(null);
+  }, [activeId]);
+
+  useEffect(() => () => {
+    if (blockHandleHideTimer.current !== null) window.clearTimeout(blockHandleHideTimer.current);
+  }, []);
+
+  function keepBlockHandleVisible() {
+    if (blockHandleHideTimer.current !== null) window.clearTimeout(blockHandleHideTimer.current);
+    blockHandleHideTimer.current = null;
+  }
+
+  function hideBlockHandleSoon() {
+    if (draggedBlockRef.current !== null) return;
+    keepBlockHandleVisible();
+    blockHandleHideTimer.current = window.setTimeout(() => {
+      setBlockHandle(null);
+      blockHandleHideTimer.current = null;
+    }, 250);
+  }
+
+  function showBlockHandle(event: React.MouseEvent<HTMLDivElement>) {
+    if (!editor || draggedBlockRef.current !== null) return;
+    keepBlockHandleVisible();
+    const body = editor.view.dom;
+    let block = event.target instanceof Element ? event.target : null;
+    while (block && block.parentElement !== body) block = block.parentElement;
+    if (!block || block.parentElement !== body) return;
+    const index = Array.prototype.indexOf.call(body.children, block) as number;
+    const page = documentPageRef.current;
+    if (!page || index < 0 || index >= editor.state.doc.childCount) return;
+    const top = block.getBoundingClientRect().top - page.getBoundingClientRect().top;
+    setBlockHandle((current) => current?.index === index && current.top === top ? current : { index, top });
+  }
+
+  function blockInsertionAt(clientY: number): BlockDropTarget | null {
+    if (!editor || !documentPageRef.current) return null;
+    const blocks = Array.from(editor.view.dom.children) as HTMLElement[];
+    if (!blocks.length) return null;
+    const beforeIndex = blocks.findIndex((block) => {
+      const bounds = block.getBoundingClientRect();
+      return clientY < (bounds.top + bounds.bottom) / 2;
+    });
+    const index = beforeIndex < 0 ? blocks.length : beforeIndex;
+    const edge = index === blocks.length
+      ? blocks[blocks.length - 1].getBoundingClientRect().bottom
+      : blocks[index].getBoundingClientRect().top;
+    return { beforeIndex: index, top: edge - documentPageRef.current.getBoundingClientRect().top };
+  }
+
+  function handleBlockDragOver(event: React.DragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("application/x-noted-block") || draggedBlockRef.current === null) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const target = blockInsertionAt(event.clientY);
+    const fromIndex = draggedBlockRef.current;
+    setBlockDropTarget(target && target.beforeIndex !== fromIndex && target.beforeIndex !== fromIndex + 1 ? target : null);
+  }
+
+  function handleBlockDrop(event: React.DragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("application/x-noted-block")) return;
+    event.preventDefault();
+    const fromIndex = draggedBlockRef.current;
+    const target = blockInsertionAt(event.clientY);
+    if (editor && fromIndex !== null && target) moveTopLevelBlock(editor, fromIndex, target.beforeIndex);
+    draggedBlockRef.current = null;
+    keepBlockHandleVisible();
+    setBlockHandle(null);
+    setBlockDropTarget(null);
+  }
 
   function updateSlashMenu(next: SlashMenuState | null) {
     slashMenuRef.current = next;
@@ -388,7 +523,7 @@ export default function App() {
       });
       return true;
     }
-    if ((event.key === "Enter" || event.key === "Tab") && filtered.length) {
+    if (((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") && filtered.length) {
       event.preventDefault();
       runSlashCommandRef.current(filtered[current.selectedIndex]?.id ?? filtered[0].id);
       return true;
@@ -535,6 +670,7 @@ export default function App() {
       });
       editorDocumentId.current = activeDocument.id;
       setSelection(null);
+      setSelectionMenuPosition(null);
       updateSlashMenu(null);
     }
   }, [editor, activeDocument?.id, activeDocument?.revision, activeDocument?.content_json]);
@@ -681,7 +817,23 @@ export default function App() {
   selectionChangeRef.current = (currentEditor) => {
     const { from, to } = currentEditor.state.selection;
     const quote = currentEditor.state.doc.textBetween(from, to, " ");
-    setSelection(from !== to && quote.trim() ? { from, to, quote: quote.trim() } : null);
+    const hasText = from !== to && Boolean(quote.trim());
+    setSelection(hasText ? { from, to, quote: quote.trim() } : null);
+    const page = documentPageRef.current;
+    if (!hasText || !page) {
+      setSelectionMenuPosition(null);
+      return;
+    }
+    const start = currentEditor.view.coordsAtPos(from);
+    const end = currentEditor.view.coordsAtPos(to);
+    const pageRect = page.getBoundingClientRect();
+    const editorAreaRect = page.closest(".editor-area")?.getBoundingClientRect();
+    const menuWidth = 266;
+    const above = Math.min(start.top, end.top) - 44;
+    setSelectionMenuPosition({
+      top: (editorAreaRect && above < editorAreaRect.top + 4 ? Math.max(start.bottom, end.bottom) + 7 : above) - pageRect.top,
+      left: Math.max(0, Math.min((start.left + end.right) / 2 - pageRect.left - menuWidth / 2, pageRect.width - menuWidth)),
+    });
   };
 
   useEffect(() => {
@@ -706,8 +858,8 @@ export default function App() {
     }
   }
 
-  async function handleNewProject() {
-    const name = window.prompt("Project name", "Untitled project")?.trim();
+  async function handleNewProject(name: string) {
+    name = name.trim();
     if (!name) return;
     try {
       const sortOrder = projectsRef.current.length
@@ -721,8 +873,8 @@ export default function App() {
     }
   }
 
-  async function handleRenameProject(project: NoteProject) {
-    const name = window.prompt("Rename project", project.name)?.trim();
+  async function handleRenameProject(project: NoteProject, name: string) {
+    name = name.trim();
     if (!name || name === project.name) return;
     try {
       const updated = await renameProject(userId, project.id, name);
@@ -730,6 +882,30 @@ export default function App() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to rename the project.");
     }
+  }
+
+  async function handleRenameDocument(document: NoteDocument, title: string) {
+    title = title.trim();
+    if (!title || title === document.title) return;
+    applyLocalDocumentUpdate(document.id, { title });
+    scheduleSave(document.id, { title });
+    await flushPendingSave();
+  }
+
+  function showRailContextMenu(kind: "project" | "document", id: string, x: number, y: number) {
+    setRailContextMenu({
+      kind,
+      id,
+      x: Math.max(8, Math.min(x, window.innerWidth - 188)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 96)),
+    });
+  }
+
+  function handleRailContextKey(event: React.KeyboardEvent<HTMLElement>, kind: "project" | "document", id: string) {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    showRailContextMenu(kind, id, bounds.left + 24, bounds.bottom);
   }
 
   async function handleProjectCollapsed(project: NoteProject) {
@@ -886,7 +1062,6 @@ export default function App() {
   }
 
   async function handleArchiveDocument(document: NoteDocument) {
-    if (!window.confirm(`Archive “${document.title}”? You can restore it from Archived.`)) return;
     try {
       await flushPendingSave();
       if (pendingUpdates.current.has(document.id)) {
@@ -925,7 +1100,6 @@ export default function App() {
   }
 
   async function handleArchiveProject(project: NoteProject) {
-    if (!window.confirm(`Archive “${project.name}”? Its notes will stay together and can be restored from Archived.`)) return;
     try {
       const updated = await updateProject(userId, project.id, { archived_at: new Date().toISOString() });
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
@@ -1075,7 +1249,10 @@ export default function App() {
     }
   }
 
-  const webMcpApiRef = useRef<WebMcpApi | null>(null);
+  const webMcpApiRef = useRef<Pick<WebMcpApi,
+    "listProjects" | "createProject" | "listDocuments" | "getDocument" | "openDocument" |
+    "createDocument" | "updateDocument" | "listComments" | "addComment" | "replyToComment" |
+    "setCommentStatus" | "listNotifications" | "acknowledgeNotification" | "completeNotification"> | null>(null);
   webMcpApiRef.current = {
     listProjects: async (search, includeArchived = false) => {
       const normalized = search?.toLowerCase();
@@ -1274,6 +1451,61 @@ export default function App() {
       listNotifications: (...args) => webMcpApiRef.current!.listNotifications(...args),
       acknowledgeNotification: (...args) => webMcpApiRef.current!.acknowledgeNotification(...args),
       completeNotification: (...args) => webMcpApiRef.current!.completeNotification(...args),
+      listBasedDatabases: async () => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        return { folders: catalog.folders, databases: catalog.databases, tables: catalog.tables };
+      },
+      getBasedDatabase: async (databaseId) => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        const database = catalog.databases.find((item) => item.id === databaseId);
+        if (!database) throw new Error("Database not found.");
+        const tables = catalog.tables.filter((item) => item.database_id === databaseId);
+        return { database, tables, fields: catalog.fields.filter((field) => tables.some((table) => table.id === field.table_id)),
+          relations: catalog.relations.filter((item) => item.database_id === databaseId) };
+      },
+      queryBasedRecords: async (tableId, offset, limit, search) => loadBasedRecords(userIdRef.current, tableId, offset, limit, { search }),
+      createBasedDatabase: async (name) => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        return createBasedDatabase(userIdRef.current, name.trim(), null,
+          nextBasedOrder(catalog.databases.filter((item) => item.folder_id === null)));
+      },
+      createBasedTable: async (databaseId, name) => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        if (!catalog.databases.some((item) => item.id === databaseId)) throw new Error("Database not found.");
+        return createBasedTable(userIdRef.current, databaseId, name.trim(),
+          nextBasedOrder(catalog.tables.filter((item) => item.database_id === databaseId)));
+      },
+      createBasedField: async (tableId, name, type, targetTableId) => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        const table = catalog.tables.find((item) => item.id === tableId);
+        if (!table || !basedFieldTypes.some((item) => item.value === type) || type === "itemName") throw new Error("Invalid table or field type.");
+        const fieldOrder = nextBasedOrder(catalog.fields.filter((item) => item.table_id === tableId));
+        if (type === "linkedRecord") {
+          const target = catalog.tables.find((item) => item.id === targetTableId && item.database_id === table.database_id);
+          if (!target) throw new Error("Target table not found in this database.");
+          return createBasedRelation(userIdRef.current, table.database_id, tableId, target.id, name.trim(), fieldOrder,
+            target.id === tableId ? fieldOrder + 1 : nextBasedOrder(catalog.fields.filter((item) => item.table_id === target.id)));
+        }
+        return createBasedField(userIdRef.current, tableId, name.trim(), type as Exclude<import("./lib/basedTypes").BasedFieldType, "linkedRecord">, fieldOrder);
+      },
+      createBasedRecord: async (tableId, cells) => {
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        if (!catalog.tables.some((item) => item.id === tableId)) throw new Error("Table not found.");
+        const values = validateBasedCells(catalog.fields, tableId, cells);
+        const created = await createBasedRecord(userIdRef.current, tableId,
+          await nextBasedRecordOrder(userIdRef.current, tableId));
+        return Object.keys(values).length ? mergeBasedRecordCells(userIdRef.current, created.id, values) : created;
+      },
+      updateBasedRecord: async (recordId, cells) => {
+        const record = await basedGet<BasedRecord>("based_records", recordId, userIdRef.current);
+        const catalog = await loadBasedCatalog(userIdRef.current);
+        const values = validateBasedCells(catalog.fields, record.table_id, cells);
+        return mergeBasedRecordCells(userIdRef.current, recordId, values);
+      },
+      setBasedLink: async (relationId, leftRecordId, rightRecordId, linked) => {
+        await setBasedLink(userIdRef.current, relationId, leftRecordId, rightRecordId, linked);
+        return { relation_id: relationId, left_record_id: leftRecordId, right_record_id: rightRecordId, linked };
+      },
     });
   }, []);
 
@@ -1301,24 +1533,118 @@ export default function App() {
   if (isSupabaseConfigured && !session) {
     return <AuthGate onAuthenticated={setSession} />;
   }
+  if (tool === "based") return <BasedApp userId={userId} railWidth={railWidth} onSwitch={() => {
+    localStorage.setItem("noted-active-tool", "noted");
+    setRailVisible(localStorage.getItem(railVisibleStorageKey) !== "false");
+    setTool("noted");
+  }} />;
 
   function selectDocument(documentId: string) {
     setActiveId(documentId);
     setMobileRailOpen(false);
   }
 
+  function submitRailActionDialog() {
+    const dialog = railActionDialog;
+    if (!dialog) return;
+    const value = dialog.value.trim();
+    if ((dialog.kind === "create-project" || dialog.kind.startsWith("rename-")) && !value) return;
+    setRailActionDialog(null);
+    if (dialog.kind === "create-project") {
+      void handleNewProject(value);
+      return;
+    }
+    if (dialog.kind.endsWith("project")) {
+      const project = projectsRef.current.find((item) => item.id === dialog.id);
+      if (!project) return;
+      if (dialog.kind === "rename-project") void handleRenameProject(project, value);
+      else void handleArchiveProject(project);
+      return;
+    }
+    const document = documentsRef.current.find((item) => item.id === dialog.id);
+    if (!document) return;
+    if (dialog.kind === "rename-document") void handleRenameDocument(document, value);
+    else void handleArchiveDocument(document);
+  }
+
   return (
-    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""} ${mobileRailOpen ? "mobile-rail-open" : ""}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""} ${mobileRailOpen ? "mobile-rail-open" : ""} ${railVisible ? "" : "rail-hidden"}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+      {railContextMenu && (
+        <div
+          ref={railContextMenuRef}
+          className="rail-context-menu"
+          role="menu"
+          aria-label={`${railContextMenu.kind === "project" ? "Project" : "Note"} actions`}
+          style={{ left: railContextMenu.x, top: railContextMenu.y }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            event.preventDefault();
+            const buttons = [...event.currentTarget.querySelectorAll("button")];
+            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+          }}
+        >
+          <button type="button" role="menuitem" onClick={() => {
+            const item = railContextMenu.kind === "project"
+              ? projectsRef.current.find((project) => project.id === railContextMenu.id)
+              : documentsRef.current.find((document) => document.id === railContextMenu.id);
+            setRailContextMenu(null);
+            if (!item) return;
+            setRailActionDialog({ kind: railContextMenu.kind === "project" ? "rename-project" : "rename-document", id: item.id, value: railContextMenu.kind === "project" ? (item as NoteProject).name : (item as NoteDocument).title });
+          }}>Rename</button>
+          <button type="button" role="menuitem" onClick={() => {
+            const item = railContextMenu.kind === "project"
+              ? projectsRef.current.find((project) => project.id === railContextMenu.id)
+              : documentsRef.current.find((document) => document.id === railContextMenu.id);
+            setRailContextMenu(null);
+            if (!item) return;
+            setRailActionDialog({ kind: railContextMenu.kind === "project" ? "archive-project" : "archive-document", id: item.id, value: railContextMenu.kind === "project" ? (item as NoteProject).name : (item as NoteDocument).title });
+          }}>Archive</button>
+        </div>
+      )}
+      {railActionDialog && (
+        <div className="rail-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setRailActionDialog(null); }}>
+          <form
+            className="rail-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={railActionDialog.kind === "create-project" ? "Create project" : railActionDialog.kind.startsWith("rename-") ? "Rename" : "Archive"}
+            onSubmit={(event) => { event.preventDefault(); submitRailActionDialog(); }}
+          >
+            <h2>{railActionDialog.kind === "create-project" ? "New project" : railActionDialog.kind.startsWith("rename-") ? "Rename" : "Archive"}</h2>
+            {railActionDialog.kind.startsWith("archive-") ? (
+              <p>Archive “{railActionDialog.value}”? You can restore it from Archived.</p>
+            ) : (
+              <input
+                autoFocus
+                aria-label={railActionDialog.kind === "rename-document" ? "Note name" : "Project name"}
+                value={railActionDialog.value}
+                onChange={(event) => setRailActionDialog((current) => current ? { ...current, value: event.target.value } : null)}
+                maxLength={180}
+              />
+            )}
+            <div className="rail-dialog-actions">
+              <button type="button" onClick={() => setRailActionDialog(null)}>Cancel</button>
+              <button type="submit" className="rail-dialog-primary" disabled={!railActionDialog.kind.startsWith("archive-") && !railActionDialog.value.trim()}>
+                {railActionDialog.kind === "create-project" ? "Create" : railActionDialog.kind.startsWith("rename-") ? "Save" : "Archive"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {draggedProject && (
         <div className="project-drag-preview" style={{ left: draggedProject.x + 12, top: draggedProject.y + 12 }} aria-hidden="true">
-          <GripVertical size={13} /> {draggedProject.name}
+          {draggedProject.name}
         </div>
       )}
       <button type="button" className="mobile-rail-backdrop" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)} />
       <aside className="document-rail" aria-label="Documents" id="document-rail">
         <div className="rail-actions">
-          <span className="rail-brand">Noted</span>
+          <button type="button" className="rail-brand based-brand" title="Switch to Based" onClick={() => {
+            void flushPendingSave(); localStorage.setItem("noted-active-tool", "based"); setTool("based");
+          }}>Noted</button>
           <div className="rail-tools">
+            <IconButton label="Hide sidebar" onClick={() => { setRailVisible(false); localStorage.setItem(railVisibleStorageKey, "false"); }}><PanelLeftClose size={18} /></IconButton>
             <IconButton label="Search documents" active={searching} onClick={() => setSearching((value) => !value)}>
               <Search size={18} />
             </IconButton>
@@ -1340,8 +1666,8 @@ export default function App() {
         <div className="document-list">
           <div className="rail-section-heading">
             <p className="rail-label">Projects</p>
-            <button type="button" aria-label="Create project" title="Create project" onClick={() => void handleNewProject()}>
-              <FolderPlus size={14} />
+            <button type="button" aria-label="Create project" title="Create project" onClick={() => setRailActionDialog({ kind: "create-project", value: "" })}>
+              <FolderPlus size={16} />
             </button>
           </div>
           {activeProjects.map((project) => {
@@ -1361,6 +1687,16 @@ export default function App() {
               >
                 <div
                   className="project-heading"
+                  draggable
+                  onClick={() => void handleProjectCollapsed(project)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    showRailContextMenu("project", project.id, event.clientX, event.clientY);
+                  }}
+                  onKeyDown={(event) => handleRailContextKey(event, "project", project.id)}
+                  onDragStart={(event) => startProjectDrag(event, project)}
+                  onDrag={(event) => updateProjectDrag(event)}
+                  onDragEnd={endProjectDrag}
                   onDragOver={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -1381,50 +1717,37 @@ export default function App() {
                     endProjectDrag();
                   }}
                 >
-                  <span
-                    className="project-drag-handle"
-                    title="Drag project"
-                    draggable
-                    onDragStart={(event) => startProjectDrag(event, project)}
-                    onDrag={(event) => updateProjectDrag(event)}
-                    onDragEnd={endProjectDrag}
-                  ><GripVertical size={13} /></span>
                   <button
                     type="button"
                     className="project-collapse"
                     aria-label={`${project.collapsed ? "Expand" : "Collapse"} ${project.name}`}
                     aria-expanded={!project.collapsed}
                     title={project.collapsed ? "Expand project" : "Collapse project"}
-                    onClick={() => void handleProjectCollapsed(project)}
                   >
-                    {project.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    {project.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
                   </button>
-                  <button type="button" className="project-title" title="Rename project" onClick={() => void handleRenameProject(project)}>
+                  <button type="button" className="project-title" aria-expanded={!project.collapsed} title={project.collapsed ? "Expand project" : "Collapse project"}>
                     {project.name}
                   </button>
-                  <button type="button" className="project-new-note" aria-label={`New note in ${project.name}`} onClick={() => void handleNewDocument(project.id)}>
-                    <Plus size={13} />
-                  </button>
-                  <button type="button" className="project-archive" aria-label={`Archive ${project.name}`} title="Archive project" onClick={() => void handleArchiveProject(project)}>
-                    <Archive size={13} />
+                  <button type="button" className="project-new-note" aria-label={`New note in ${project.name}`} onClick={(event) => { event.stopPropagation(); void handleNewDocument(project.id); }}>
+                    <Plus size={16} />
                   </button>
                 </div>
                 {!project.collapsed && projectDocuments.map((document) => (
                   <div
                     className={`document-row project-document ${document.id === activeId ? "is-selected" : ""}`}
                     draggable
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      showRailContextMenu("document", document.id, event.clientX, event.clientY);
+                    }}
+                    onKeyDown={(event) => handleRailContextKey(event, "document", document.id)}
                     onDragStart={(event) => startDocumentDrag(event, document.id)}
                     onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; }}
                     onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), project.id, document.id); }}
                     key={document.id}
                   >
-                    <span className="drag-handle" title="Drag note">
-                      <GripVertical size={13} />
-                    </span>
                     <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
-                    <button type="button" className="archive-note" aria-label={`Archive ${document.title}`} title="Archive note" onClick={() => void handleArchiveDocument(document)}>
-                      <Archive size={14} />
-                    </button>
                   </div>
                 ))}
               </section>
@@ -1461,18 +1784,17 @@ export default function App() {
             <div
               className={`document-row ${document.id === activeId ? "is-selected" : ""}`}
               draggable
+              onContextMenu={(event) => {
+                event.preventDefault();
+                showRailContextMenu("document", document.id, event.clientX, event.clientY);
+              }}
+              onKeyDown={(event) => handleRailContextKey(event, "document", document.id)}
               onDragStart={(event) => startDocumentDrag(event, document.id)}
               onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; }}
               onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), null, document.id); }}
               key={document.id}
             >
-              <span className="drag-handle" title="Drag note">
-                <GripVertical size={13} />
-              </span>
               <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
-              <button type="button" className="archive-note" aria-label={`Archive ${document.title}`} title="Archive note" onClick={() => void handleArchiveDocument(document)}>
-                <Archive size={14} />
-              </button>
             </div>
           ))}
           {!ungroupedDocuments.length && <p className="empty-list">No ungrouped notes.</p>}
@@ -1506,16 +1828,16 @@ export default function App() {
           onPointerDown={startRailResize}
         />
         <div className="rail-footer">
-          <span className={`connection-dot ${isSupabaseConfigured ? "cloud" : "local"}`} />
-          <Braces size={14} />
-          <span>WebMCP</span>
-          <ChevronLeft size={16} className="rail-chevron" />
+          <IconButton label="Workspace settings" onClick={() => setSettingsOpen(true)}><Ellipsis size={19} /></IconButton>
         </div>
       </aside>
 
       <main className="workspace">
         <header className="workspace-header">
-          <span className="document-breadcrumb desktop-breadcrumb">{activeDocument?.title ?? "Noted"}</span>
+          <div className="workspace-location">
+            {!railVisible && <button type="button" className="sidebar-show" aria-label="Show sidebar" title="Show sidebar" onClick={() => { setRailVisible(true); localStorage.setItem(railVisibleStorageKey, "true"); }}><PanelLeftOpen size={18} /></button>}
+            <span className="document-breadcrumb desktop-breadcrumb">{activeDocument?.title ?? "Noted"}</span>
+          </div>
           <button
             type="button"
             className="document-breadcrumb mobile-rail-toggle"
@@ -1604,106 +1926,120 @@ export default function App() {
               <MessageCircle size={18} />
               {openThreads > 0 && <span className="count-badge">{openThreads}</span>}
             </button>
-            <IconButton label="Workspace settings" onClick={() => setSettingsOpen(true)}><Ellipsis size={19} /></IconButton>
           </div>
         </header>
 
         <section className={`editor-area ${wideContent ? "is-wide" : ""}`} aria-label="Editor">
-          <div className="toolbar" role="toolbar" aria-label="Text formatting">
-            <div className="toolbar-controls">
-            <label className="style-select">
-              <select
-                aria-label="Text style"
-                value={editor?.isActive("heading", { level: 1 }) ? "h1" : editor?.isActive("heading", { level: 2 }) ? "h2" : editor?.isActive("heading", { level: 3 }) ? "h3" : "p"}
-                onChange={(event) => {
-                  if (!editor) return;
-                  const value = event.target.value;
-                  if (value === "p") editor.chain().focus().setParagraph().run();
-                  else editor.chain().focus().toggleHeading({ level: Number(value.slice(1)) as 1 | 2 | 3 }).run();
-                }}
-              >
-                <option value="p">Text</option>
-                <option value="h1">Heading 1</option>
-                <option value="h2">Heading 2</option>
-                <option value="h3">Heading 3</option>
-              </select>
-              <ChevronDown size={15} />
-            </label>
-            <span className="toolbar-divider" />
-            <IconButton label="Bold" active={editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={18} /></IconButton>
-            <IconButton label="Italic" active={editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={18} /></IconButton>
-            <IconButton label="Inline code" active={editor?.isActive("code")} onClick={() => editor?.chain().focus().toggleCode().run()}><Braces size={17} /></IconButton>
-            <IconButton label="Link" active={editor?.isActive("link")} onClick={() => {
-              if (!editor) return;
-              const current = editor.getAttributes("link").href as string | undefined;
-              const href = window.prompt("Link URL", current ?? "https://");
-              if (href === null) return;
-              if (!href) editor.chain().focus().unsetLink().run();
-              else editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
-            }}><LinkIcon size={17} /></IconButton>
-            <span className="toolbar-divider" />
-            <IconButton label="Bulleted list" active={editor?.isActive("bulletList")} onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={18} /></IconButton>
-            <IconButton label="Numbered list" active={editor?.isActive("orderedList")} onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={18} /></IconButton>
-            <IconButton label="Checklist" active={editor?.isActive("taskList")} onClick={() => editor?.chain().focus().toggleTaskList().run()}><CheckSquare size={18} /></IconButton>
-            <IconButton label="Quote" active={editor?.isActive("blockquote")} onClick={() => editor?.chain().focus().toggleBlockquote().run()}><Quote size={18} /></IconButton>
-            <span className="toolbar-spacer" />
-            <IconButton label="Undo" disabled={!editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}><Undo2 size={17} /></IconButton>
-            <IconButton label="Redo" disabled={!editor?.can().redo()} onClick={() => editor?.chain().focus().redo().run()}><Redo2 size={17} /></IconButton>
-            </div>
-            <div
-              ref={toolbarMenuRef}
-              className="toolbar-more-menu"
-            >
-              <button
-                type="button"
-                className={`icon-button ${toolbarMenuOpen ? "is-active" : ""}`}
-                aria-label="Page options"
-                aria-controls="page-options-popover"
-                aria-expanded={toolbarMenuOpen}
-                title="Page options"
-                onClick={() => setToolbarMenuOpen((value) => !value)}
-              >
-                <Ellipsis size={19} />
-              </button>
-              {toolbarMenuOpen && (
-                <div id="page-options-popover" className="toolbar-more-popover" role="group" aria-label="Page options">
-                  <label
-                    className="toolbar-menu-item"
-                  >
-                    <Maximize2 size={16} />
-                    <span>Wide</span>
-                    <span className="toggle-switch">
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        checked={wideContent}
-                        onChange={toggleWideContent}
-                      />
-                      <span className="toggle-switch-track" aria-hidden="true">
-                        <span className="toggle-switch-thumb" />
-                      </span>
-                    </span>
-                  </label>
-                </div>
-              )}
-            </div>
-          </div>
-
           {loading ? (
             <div className="editor-loading">Loading your notes…</div>
           ) : activeDocument ? (
-            <article className="document-page" ref={documentPageRef}>
-              <input
-                className="document-title"
-                aria-label="Document title"
-                value={activeDocument.title}
-                onChange={(event) => handleTitleChange(event.target.value)}
-                onBlur={() => void flushPendingSave()}
-              />
-              <EditorContent editor={editor} onBlur={() => {
+            <article
+              className="document-page"
+              ref={documentPageRef}
+              onMouseLeave={hideBlockHandleSoon}
+              onDragOver={handleBlockDragOver}
+              onDrop={handleBlockDrop}
+            >
+              <div className="document-title-row">
+                <input
+                  className="document-title"
+                  aria-label="Document title"
+                  value={activeDocument.title}
+                  onChange={(event) => handleTitleChange(event.target.value)}
+                  onBlur={() => void flushPendingSave()}
+                />
+                <div className="document-title-actions">
+                  <IconButton label="Undo" disabled={!editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}><Undo2 size={17} /></IconButton>
+                  <IconButton label="Redo" disabled={!editor?.can().redo()} onClick={() => editor?.chain().focus().redo().run()}><Redo2 size={17} /></IconButton>
+                  <div ref={toolbarMenuRef} className="toolbar-more-menu">
+                    <button
+                      type="button"
+                      className={`icon-button ${toolbarMenuOpen ? "is-active" : ""}`}
+                      aria-label="Page options"
+                      aria-controls="page-options-popover"
+                      aria-expanded={toolbarMenuOpen}
+                      title="Page options"
+                      onClick={() => setToolbarMenuOpen((value) => !value)}
+                    >
+                      <Ellipsis size={19} />
+                    </button>
+                    {toolbarMenuOpen && (
+                      <div id="page-options-popover" className="toolbar-more-popover" role="group" aria-label="Page options">
+                        <label className="toolbar-menu-item">
+                          <Maximize2 size={16} />
+                          <span>Wide</span>
+                          <span className="toggle-switch">
+                            <input type="checkbox" role="switch" checked={wideContent} onChange={toggleWideContent} />
+                            <span className="toggle-switch-track" aria-hidden="true"><span className="toggle-switch-thumb" /></span>
+                          </span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {selection && selectionMenuPosition && (
+                <div className="selection-toolbar" role="toolbar" aria-label="Selected text formatting" style={selectionMenuPosition}>
+                  <label className="selection-block-select">
+                    <select
+                      aria-label="Convert block"
+                      value={editor?.isActive("taskList") ? "taskList" : editor?.isActive("bulletList") ? "bulletList" : editor?.isActive("orderedList") ? "orderedList" : editor?.isActive("blockquote") ? "blockquote" : editor?.isActive("heading", { level: 1 }) ? "heading-1" : editor?.isActive("heading", { level: 2 }) ? "heading-2" : editor?.isActive("heading", { level: 3 }) ? "heading-3" : "paragraph"}
+                      onChange={(event) => { if (editor) changeSelectedBlock(editor, event.target.value); }}
+                    >
+                      <option value="paragraph">Text</option>
+                      <option value="heading-1">Heading 1</option>
+                      <option value="heading-2">Heading 2</option>
+                      <option value="heading-3">Heading 3</option>
+                      <option value="bulletList">Bulleted list</option>
+                      <option value="orderedList">Numbered list</option>
+                      <option value="taskList">To-do list</option>
+                      <option value="blockquote">Quote</option>
+                    </select>
+                    <ChevronDown size={14} />
+                  </label>
+                  <span className="selection-toolbar-divider" />
+                  <IconButton label="Bold" active={editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={17} /></IconButton>
+                  <IconButton label="Italic" active={editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={17} /></IconButton>
+                  <IconButton label="Inline code" active={editor?.isActive("code")} onClick={() => editor?.chain().focus().toggleCode().run()}><Braces size={16} /></IconButton>
+                  <IconButton label="Link" active={editor?.isActive("link")} onClick={() => {
+                    if (!editor) return;
+                    const current = editor.getAttributes("link").href as string | undefined;
+                    const href = window.prompt("Link URL", current ?? "https://");
+                    if (href === null) return;
+                    if (!href) editor.chain().focus().unsetLink().run();
+                    else editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+                  }}><LinkIcon size={16} /></IconButton>
+                </div>
+              )}
+              <EditorContent editor={editor} onMouseMove={showBlockHandle} onBlur={() => {
                 updateSlashMenu(null);
                 void flushPendingSave();
               }} />
+              {blockHandle && (
+                <button
+                  type="button"
+                  className="block-drag-handle"
+                  style={{ top: blockHandle.top }}
+                  draggable
+                  aria-label="Drag block to reorder"
+                  title="Drag to move block"
+                  onMouseEnter={keepBlockHandleVisible}
+                  onMouseLeave={hideBlockHandleSoon}
+                  onDragStart={(event) => {
+                    keepBlockHandleVisible();
+                    draggedBlockRef.current = blockHandle.index;
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("application/x-noted-block", String(blockHandle.index));
+                  }}
+                  onDragEnd={() => {
+                    draggedBlockRef.current = null;
+                    keepBlockHandleVisible();
+                    setBlockHandle(null);
+                    setBlockDropTarget(null);
+                  }}
+                ><GripVertical size={16} strokeWidth={2} /></button>
+              )}
+              {blockDropTarget && <div className="block-drop-indicator" style={{ top: blockDropTarget.top }} aria-hidden="true" />}
               {slashMenu && (() => {
                 const filtered = filterSlashCommands(slashMenu.query);
                 return (
