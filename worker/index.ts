@@ -4,6 +4,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { resolveCommentAnchor } from "./commentAnchor";
 import { normalizeBasedOptions, updatedBasedOptions } from "../src/lib/basedOptions";
+import { prepareBasedCells } from "../src/lib/basedCells";
 
 preloadSchemas();
 
@@ -518,19 +519,17 @@ function createNotedServer(env: Env) {
     ensureNoError(result.error);
     return result.data ?? [];
   }
-  function cleanCells(fields: Array<Record<string, unknown>>, cells: Record<string, unknown>) {
-    const result: Record<string, unknown> = {};
-    for (const [id, value] of Object.entries(cells)) {
-      const field = fields.find((item) => item.id === id && !item.archived_at);
-      if (!field || field.type === "linkedRecord") throw new Error(`Invalid field: ${id}`);
-      if (field.type === "checkbox" ? typeof value !== "boolean"
-        : field.type === "multiSelect" ? !Array.isArray(value) || !value.every((item) => typeof item === "string" && (field.options as string[]).includes(item))
-          : typeof value !== "string") throw new Error(`Invalid value for ${field.name}.`);
-      if (field.type === "number" && value && !Number.isFinite(Number(value))) throw new Error(`Invalid number for ${field.name}.`);
-      if (field.type === "singleSelect" && value && !(field.options as string[]).includes(String(value))) throw new Error(`Invalid option for ${field.name}.`);
-      result[id] = value;
+  async function prepareMcpCells(tableId: string, values: Record<string, unknown>) {
+    const prepared = prepareBasedCells(await basedFields(tableId), tableId, values, true);
+    for (const update of prepared.optionUpdates) {
+      const field = await basedOne("based_fields", update.fieldId);
+      const options = updatedBasedOptions(field.options as string[], update.options, "append");
+      const result = await client.from("based_fields").update({ options })
+        .eq("owner_id", ownerId).eq("id", update.fieldId).select().maybeSingle();
+      ensureNoError(result.error);
+      if (!result.data) throw new Error("Field not found.");
     }
-    return result;
+    return prepared.cells;
   }
 
   server.registerTool("list_based_databases", {
@@ -647,11 +646,11 @@ function createNotedServer(env: Env) {
   }));
 
   server.registerTool("create_based_record", {
-    description: "Create a row with cell values keyed by field ID.",
+    description: "Create a row with cell values keyed by field ID. New select values automatically become field choices.",
     inputSchema: z.object({ table_id: z.uuid(), cells: z.record(z.string(), z.unknown()).default({}) }), annotations: { readOnlyHint: false },
   }, ({ table_id, cells }) => guarded(async () => {
     await basedOne("based_tables", table_id);
-    const values = cleanCells(await basedFields(table_id), cells);
+    const values = await prepareMcpCells(table_id, cells);
     const sort_order = await basedNextOrder("based_records", "table_id", table_id);
     const result = await client.from("based_records").insert({ owner_id: ownerId, table_id, cells: values, sort_order }).select().single();
     ensureNoError(result.error);
@@ -659,11 +658,11 @@ function createNotedServer(env: Env) {
   }));
 
   server.registerTool("update_based_record", {
-    description: "Update cell values in a Based row by field ID.",
+    description: "Update cell values in a Based row by field ID. New select values automatically become field choices.",
     inputSchema: z.object({ record_id: z.uuid(), cells: z.record(z.string(), z.unknown()) }), annotations: { readOnlyHint: false },
   }, ({ record_id, cells }) => guarded(async () => {
     const record = await basedOne("based_records", record_id);
-    const values = cleanCells(await basedFields(record.table_id), cells);
+    const values = await prepareMcpCells(record.table_id, cells);
     const result = await client.rpc("based_merge_record_cells_admin", { p_owner_id: ownerId, p_record_id: record_id, p_cells: values });
     ensureNoError(result.error);
     return result.data;

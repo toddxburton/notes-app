@@ -10,7 +10,8 @@ Based supports text, number, date, select, multiselect, URL, checkbox, and two-w
 
 Based has a separate JSON export/import flow and daily cloud snapshots. Import replaces only Based data. The `based_workspace` migration must be applied before using Based with Supabase; local preview mode stores Based data under a separate browser storage key. Browser and remote MCP endpoints expose Based discovery, schema creation, record queries and edits, and links.
 
-MCP callers can pass `options` when creating `singleSelect` or `multiSelect` fields, or call `update_based_field_options` with a field ID and a list of choices. The update tool appends by default, preserving existing choices; `mode: "replace"` replaces the entire list. `get_based_database` returns field IDs and their current choices. Choices must exist before select values are written into records.
+MCP callers can pass `options` when creating `singleSelect` or `multiSelect` fields, or call `update_based_field_options` with a field ID and a list of choices. The update tool appends by default, preserving existing choices; `mode: "replace"` replaces the entire list. `get_based_database` returns field IDs and their current choices.
+For clients still using an older MCP tool definition, `create_based_record` and `update_based_record` also add previously unseen select values as choices when writing them. A single-select value is a string; a multi-select value is an array of strings.
 
 ## Local development
 

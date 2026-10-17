@@ -10,5 +10,5 @@
     "noEmit": true,
     "types": ["./worker-configuration.d.ts"]
   },
-  "include": ["worker/**/*.ts", "src/lib/basedOptions.ts", "worker-configuration.d.ts"]
+  "include": ["worker/**/*.ts", "src/lib/basedOptions.ts", "src/lib/basedCells.ts", "src/lib/basedTypes.ts", "worker-configuration.d.ts"]
 }

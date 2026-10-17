@@ -238,13 +238,13 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
       execute: (input) => api.updateBasedFieldOptions(text(input, "field_id"), input.options as string[], text(input, "mode", "append") as "append" | "replace"),
     }),
     register({
-      name: "create_based_record", description: "Create a row with values keyed by field ID.",
+      name: "create_based_record", description: "Create a row with values keyed by field ID. New select values automatically become field choices.",
       inputSchema: { type: "object", properties: { table_id: { type: "string" }, cells: { type: "object" } }, required: ["table_id"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.createBasedRecord(text(input, "table_id"), (input.cells ?? {}) as Record<string, unknown>),
     }),
     register({
-      name: "update_based_record", description: "Update values in a Based row by field ID.",
+      name: "update_based_record", description: "Update values in a Based row by field ID. New select values automatically become field choices.",
       inputSchema: { type: "object", properties: { record_id: { type: "string" }, cells: { type: "object" } }, required: ["record_id", "cells"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: (input) => api.updateBasedRecord(text(input, "record_id"), input.cells as Record<string, unknown>),

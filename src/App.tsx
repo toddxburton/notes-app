@@ -82,8 +82,9 @@ import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
 import BasedApp from "./BasedApp";
 import { basedGet, createBasedDatabase, createBasedField, createBasedRecord,
   createBasedRelation, createBasedTable, loadBasedCatalog, loadBasedRecords, mergeBasedRecordCells, nextBasedRecordOrder, setBasedLink,
-  updateBasedFieldOptions, validateBasedCells } from "./lib/basedRepo";
+  updateBasedFieldOptions } from "./lib/basedRepo";
 import { basedFieldTypes, type BasedRecord } from "./lib/basedTypes";
+import { prepareBasedCells } from "./lib/basedCells";
 import type {
   CommentNotification,
   CommentReply,
@@ -1492,16 +1493,18 @@ export default function App() {
       createBasedRecord: async (tableId, cells) => {
         const catalog = await loadBasedCatalog(userIdRef.current);
         if (!catalog.tables.some((item) => item.id === tableId)) throw new Error("Table not found.");
-        const values = validateBasedCells(catalog.fields, tableId, cells);
+        const prepared = prepareBasedCells(catalog.fields, tableId, cells, true);
+        for (const update of prepared.optionUpdates) await updateBasedFieldOptions(userIdRef.current, update.fieldId, update.options, "append");
         const created = await createBasedRecord(userIdRef.current, tableId,
           await nextBasedRecordOrder(userIdRef.current, tableId));
-        return Object.keys(values).length ? mergeBasedRecordCells(userIdRef.current, created.id, values) : created;
+        return Object.keys(prepared.cells).length ? mergeBasedRecordCells(userIdRef.current, created.id, prepared.cells) : created;
       },
       updateBasedRecord: async (recordId, cells) => {
         const record = await basedGet<BasedRecord>("based_records", recordId, userIdRef.current);
         const catalog = await loadBasedCatalog(userIdRef.current);
-        const values = validateBasedCells(catalog.fields, record.table_id, cells);
-        return mergeBasedRecordCells(userIdRef.current, recordId, values);
+        const prepared = prepareBasedCells(catalog.fields, record.table_id, cells, true);
+        for (const update of prepared.optionUpdates) await updateBasedFieldOptions(userIdRef.current, update.fieldId, update.options, "append");
+        return mergeBasedRecordCells(userIdRef.current, recordId, prepared.cells);
       },
       setBasedLink: async (relationId, leftRecordId, rightRecordId, linked) => {
         await setBasedLink(userIdRef.current, relationId, leftRecordId, rightRecordId, linked);

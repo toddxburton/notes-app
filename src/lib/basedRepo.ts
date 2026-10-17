@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import type { BasedBackup, BasedCatalog, BasedDatabase, BasedField, BasedFolder, BasedLink, BasedRecord, BasedRelation, BasedTable } from "./basedTypes";
 import { normalizeBasedOptions, updatedBasedOptions, type BasedOptionsMode } from "./basedOptions";
+import { prepareBasedCells } from "./basedCells";
 
 type Entity = BasedFolder | BasedDatabase | BasedTable | BasedField | BasedRelation | BasedRecord | BasedLink;
 type EntityName = "based_folders" | "based_databases" | "based_tables" | "based_fields" | "based_relations" | "based_records" | "based_links";
@@ -53,25 +54,7 @@ export async function basedGet<T extends Entity & { id: string }>(name: EntityNa
 }
 
 export function validateBasedCells(fields: BasedField[], tableId: string, values: Record<string, unknown>): Record<string, string | string[] | boolean> {
-  const output: Record<string, string | string[] | boolean> = {};
-  for (const [fieldId, value] of Object.entries(values)) {
-    const field = fields.find((item) => item.id === fieldId && item.table_id === tableId && !item.archived_at);
-    if (!field || field.type === "linkedRecord") throw new Error(`Invalid field: ${fieldId}`);
-    if (field.type === "checkbox") {
-      if (typeof value !== "boolean") throw new Error(`Expected boolean for ${field.name}.`);
-      output[fieldId] = value;
-    } else if (field.type === "multiSelect") {
-      if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && field.options.includes(item)))
-        throw new Error(`Invalid options for ${field.name}.`);
-      output[fieldId] = value;
-    } else {
-      if (typeof value !== "string") throw new Error(`Expected text for ${field.name}.`);
-      if (field.type === "number" && value && !Number.isFinite(Number(value))) throw new Error(`Invalid number for ${field.name}.`);
-      if (field.type === "singleSelect" && value && !field.options.includes(value)) throw new Error(`Invalid option for ${field.name}.`);
-      output[fieldId] = value;
-    }
-  }
-  return output;
+  return prepareBasedCells(fields, tableId, values).cells;
 }
 
 export async function basedInsert<T extends Entity>(name: EntityName, value: T, userId?: string | null): Promise<T> {
