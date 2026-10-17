@@ -662,7 +662,12 @@ export default {
       return Response.json({ ok: true, service: "noted-mcp" });
     }
     if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
-    if (!await verifyToken(bearerToken(request), env.NOTES_MCP_TOKEN)) return unauthorized();
+    const token = bearerToken(request);
+    const [codexAuthorized, claudeAuthorized] = await Promise.all([
+      verifyToken(token, env.NOTES_MCP_TOKEN),
+      verifyToken(token, env.CLAUDE_MCP_TOKEN),
+    ]);
+    if (!codexAuthorized && !claudeAuthorized) return unauthorized();
 
     const handler = createMcpHandler(() => createNotedServer(env), {
       route: "/mcp",

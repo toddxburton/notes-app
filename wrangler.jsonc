@@ -14,7 +14,7 @@
     "SUPABASE_URL": "https://ljxlhtqixlnqfqmhmper.supabase.co"
   },
   "secrets": {
-    "required": ["SUPABASE_SECRET_KEY", "NOTES_MCP_TOKEN", "NOTES_OWNER_ID"]
+    "required": ["SUPABASE_SECRET_KEY", "NOTES_MCP_TOKEN", "CLAUDE_MCP_TOKEN", "NOTES_OWNER_ID"]
   },
   "routes": [
     {

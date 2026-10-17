@@ -52,6 +52,7 @@ Set the Worker secrets before the first deployment:
 ```sh
 npx wrangler secret put SUPABASE_SECRET_KEY
 npx wrangler secret put NOTES_MCP_TOKEN
+npx wrangler secret put CLAUDE_MCP_TOKEN
 npx wrangler secret put NOTES_OWNER_ID
 ```
 
@@ -80,5 +81,7 @@ The signed-in page registers these WebMCP tools:
 The browser grants WebMCP access only while the signed-in page is open. Scheduled tasks and Codex tasks in other projects should instead connect to `https://noted.toddxburton.com/mcp` as a Streamable HTTP MCP server. Register that MCP server in the user-level `~/.codex/config.toml` when it should be available across every local Codex project; a repository `.codex/config.toml` applies only within that trusted project.
 
 Local Codex uses `scripts/noted-mcp-headers.sh` as an HTTP-header helper. The helper reads `NOTES_MCP_TOKEN` from the ignored `.dev.vars` file only when Codex connects to Noted, so the desktop app does not need the token in its launch environment and the token is not stored in `config.toml`. Keep `.dev.vars` readable only by the local user.
+
+Claude uses a separate `CLAUDE_MCP_TOKEN` bearer token at the same endpoint. It can be rotated or revoked independently of the Codex token. Both tokens currently grant access to the same MCP tools and owner data.
 
 Every exact `@handle` in a new comment or reply creates one durable notification. The in-app Mentions menu shows unread and historical `@todd` notifications in realtime. GPT uses the same records through MCP: it acknowledges a notification after adding it to a plan, and completes it only after the work and the `@todd Done — …` reply are finished.
