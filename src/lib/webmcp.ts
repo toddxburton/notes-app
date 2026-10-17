@@ -24,7 +24,8 @@ export interface WebMcpApi {
   queryBasedRecords: (tableId: string, offset: number, limit: number, search: string) => Promise<unknown>;
   createBasedDatabase: (name: string) => Promise<unknown>;
   createBasedTable: (databaseId: string, name: string) => Promise<unknown>;
-  createBasedField: (tableId: string, name: string, type: string, targetTableId?: string) => Promise<unknown>;
+  createBasedField: (tableId: string, name: string, type: string, targetTableId?: string, options?: string[]) => Promise<unknown>;
+  updateBasedFieldOptions: (fieldId: string, options: string[], mode: "append" | "replace") => Promise<unknown>;
   createBasedRecord: (tableId: string, cells: Record<string, unknown>) => Promise<unknown>;
   updateBasedRecord: (recordId: string, cells: Record<string, unknown>) => Promise<unknown>;
   setBasedLink: (relationId: string, leftRecordId: string, rightRecordId: string, linked: boolean) => Promise<unknown>;
@@ -225,10 +226,16 @@ export async function registerWebMcpTools(api: WebMcpApi): Promise<boolean> {
       execute: (input) => api.createBasedTable(text(input, "database_id"), text(input, "name")),
     }),
     register({
-      name: "create_based_field", description: "Add a typed column. Linked records require a target table in the same database.",
-      inputSchema: { type: "object", properties: { table_id: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 180 }, type: { type: "string", enum: ["text", "number", "date", "singleSelect", "multiSelect", "url", "checkbox", "linkedRecord"] }, target_table_id: { type: "string" } }, required: ["table_id", "name", "type"], additionalProperties: false },
+      name: "create_based_field", description: "Add a typed column. Select columns can include choices; linked records require a target table in the same database.",
+      inputSchema: { type: "object", properties: { table_id: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 180 }, type: { type: "string", enum: ["text", "number", "date", "singleSelect", "multiSelect", "url", "checkbox", "linkedRecord"] }, target_table_id: { type: "string" }, options: { type: "array", items: { type: "string", minLength: 1, maxLength: 180 }, maxItems: 2000 } }, required: ["table_id", "name", "type"], additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
-      execute: (input) => api.createBasedField(text(input, "table_id"), text(input, "name"), text(input, "type"), text(input, "target_table_id") || undefined),
+      execute: (input) => api.createBasedField(text(input, "table_id"), text(input, "name"), text(input, "type"), text(input, "target_table_id") || undefined, input.options as string[] | undefined),
+    }),
+    register({
+      name: "update_based_field_options", description: "Append or replace choices on an existing select column. Append preserves existing choices.",
+      inputSchema: { type: "object", properties: { field_id: { type: "string" }, options: { type: "array", items: { type: "string", minLength: 1, maxLength: 180 }, maxItems: 2000 }, mode: { type: "string", enum: ["append", "replace"], default: "append" } }, required: ["field_id", "options"], additionalProperties: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input) => api.updateBasedFieldOptions(text(input, "field_id"), input.options as string[], text(input, "mode", "append") as "append" | "replace"),
     }),
     register({
       name: "create_based_record", description: "Create a row with values keyed by field ID.",

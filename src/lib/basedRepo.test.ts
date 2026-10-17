@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { basedUpdate, createBasedDatabase, createBasedField, createBasedRecord, createBasedRelation,
   createBasedTable, exportBased, loadBasedCatalog, loadBasedLinks, loadBasedRecords, loadBasedRecordsByIds, mergeBasedRecordCells, restoreBased,
-  nextBasedRecordOrder, setBasedLink, validateBasedCells } from "./basedRepo";
+  nextBasedRecordOrder, setBasedLink, updateBasedFieldOptions, validateBasedCells } from "./basedRepo";
 
 vi.mock("./supabase", () => ({ supabase: null }));
 
@@ -32,6 +32,23 @@ describe("Based local workspace", () => {
     expect(await nextBasedRecordOrder(null, table.id)).toBe(3);
     const fields = (await loadBasedCatalog(null)).fields;
     expect(() => validateBasedCells(fields, table.id, { [status.id]: "Unknown" })).toThrow();
+  });
+
+  it("creates select fields with choices and accepts newly appended values", async () => {
+    const database = await createBasedDatabase(null, "Recipes", null, 0);
+    const table = (await loadBasedCatalog(null)).tables.find((item) => item.database_id === database.id)!;
+    const meal = await createBasedField(null, table.id, "Meal", "singleSelect", 1, ["Dinner", " Lunch "]);
+    const ingredients = await createBasedField(null, table.id, "Ingredients", "multiSelect", 2, ["Rice"]);
+    expect(meal.options).toEqual(["Dinner", "Lunch"]);
+    expect((await updateBasedFieldOptions(null, ingredients.id, ["Onion", "Rice"], "append")).options)
+      .toEqual(["Rice", "Onion"]);
+    const record = await createBasedRecord(null, table.id, 0);
+    const cells = validateBasedCells((await loadBasedCatalog(null)).fields, table.id, {
+      [meal.id]: "Dinner", [ingredients.id]: ["Rice", "Onion"],
+    });
+    await mergeBasedRecordCells(null, record.id, cells);
+    expect((await loadBasedRecords(null, table.id)).records[0].cells).toMatchObject(cells);
+    await expect(updateBasedFieldOptions(null, table.id, ["Invalid"])).rejects.toThrow("not found");
   });
 
   it("keeps two-way links and restores a separate backup", async () => {

@@ -82,7 +82,7 @@ import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
 import BasedApp from "./BasedApp";
 import { basedGet, createBasedDatabase, createBasedField, createBasedRecord,
   createBasedRelation, createBasedTable, loadBasedCatalog, loadBasedRecords, mergeBasedRecordCells, nextBasedRecordOrder, setBasedLink,
-  validateBasedCells } from "./lib/basedRepo";
+  updateBasedFieldOptions, validateBasedCells } from "./lib/basedRepo";
 import { basedFieldTypes, type BasedRecord } from "./lib/basedTypes";
 import type {
   CommentNotification,
@@ -1475,7 +1475,7 @@ export default function App() {
         return createBasedTable(userIdRef.current, databaseId, name.trim(),
           nextBasedOrder(catalog.tables.filter((item) => item.database_id === databaseId)));
       },
-      createBasedField: async (tableId, name, type, targetTableId) => {
+      createBasedField: async (tableId, name, type, targetTableId, options = []) => {
         const catalog = await loadBasedCatalog(userIdRef.current);
         const table = catalog.tables.find((item) => item.id === tableId);
         if (!table || !basedFieldTypes.some((item) => item.value === type) || type === "itemName") throw new Error("Invalid table or field type.");
@@ -1486,8 +1486,9 @@ export default function App() {
           return createBasedRelation(userIdRef.current, table.database_id, tableId, target.id, name.trim(), fieldOrder,
             target.id === tableId ? fieldOrder + 1 : nextBasedOrder(catalog.fields.filter((item) => item.table_id === target.id)));
         }
-        return createBasedField(userIdRef.current, tableId, name.trim(), type as Exclude<import("./lib/basedTypes").BasedFieldType, "linkedRecord">, fieldOrder);
+        return createBasedField(userIdRef.current, tableId, name.trim(), type as Exclude<import("./lib/basedTypes").BasedFieldType, "linkedRecord">, fieldOrder, options);
       },
+      updateBasedFieldOptions: (fieldId, options, mode) => updateBasedFieldOptions(userIdRef.current, fieldId, options, mode),
       createBasedRecord: async (tableId, cells) => {
         const catalog = await loadBasedCatalog(userIdRef.current);
         if (!catalog.tables.some((item) => item.id === tableId)) throw new Error("Table not found.");

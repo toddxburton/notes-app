@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import type { BasedBackup, BasedCatalog, BasedDatabase, BasedField, BasedFolder, BasedLink, BasedRecord, BasedRelation, BasedTable } from "./basedTypes";
+import { normalizeBasedOptions, updatedBasedOptions, type BasedOptionsMode } from "./basedOptions";
 
 type Entity = BasedFolder | BasedDatabase | BasedTable | BasedField | BasedRelation | BasedRecord | BasedLink;
 type EntityName = "based_folders" | "based_databases" | "based_tables" | "based_fields" | "based_relations" | "based_records" | "based_links";
@@ -157,12 +158,20 @@ export async function createBasedTable(userId: string | null, databaseId: string
   return table;
 }
 
-export async function createBasedField(userId: string | null, tableId: string, name: string, type: BasedField["type"], sortOrder: number): Promise<BasedField> {
+export async function createBasedField(userId: string | null, tableId: string, name: string, type: BasedField["type"], sortOrder: number, options: string[] = []): Promise<BasedField> {
   if (type === "linkedRecord") throw new Error("Use createBasedRelation for linked fields.");
+  if (options.length && type !== "singleSelect" && type !== "multiSelect") throw new Error("Choices are only valid for select fields.");
   return basedInsert<BasedField>("based_fields", {
-    id: id(), owner_id: owner(userId), table_id: tableId, name, type, options: [], relation_id: null,
+    id: id(), owner_id: owner(userId), table_id: tableId, name, type, options: normalizeBasedOptions(options), relation_id: null,
     relation_side: null, width: null, hidden: false, archived_at: null, sort_order: sortOrder,
   }, userId);
+}
+
+export async function updateBasedFieldOptions(userId: string | null, fieldId: string, options: string[], mode: BasedOptionsMode = "append"): Promise<BasedField> {
+  const field = await basedGet<BasedField>("based_fields", fieldId, userId);
+  if (field.archived_at || (field.type !== "singleSelect" && field.type !== "multiSelect"))
+    throw new Error("Choices can only be changed on active select fields.");
+  return basedUpdate<BasedField>("based_fields", fieldId, { options: updatedBasedOptions(field.options, options, mode) }, userId);
 }
 
 export async function createBasedRelation(userId: string | null, databaseId: string, leftTableId: string, rightTableId: string, name: string, leftOrder: number, rightOrder: number): Promise<[BasedField, BasedField]> {

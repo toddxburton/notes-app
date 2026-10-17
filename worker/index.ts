@@ -3,6 +3,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { resolveCommentAnchor } from "./commentAnchor";
+import { normalizeBasedOptions, updatedBasedOptions } from "../src/lib/basedOptions";
 
 preloadSchemas();
 
@@ -604,14 +605,15 @@ function createNotedServer(env: Env) {
   }));
 
   server.registerTool("create_based_field", {
-    description: "Create a typed field. A linked field also creates a visible reciprocal field in its target table.",
-    inputSchema: z.object({ table_id: z.uuid(), name: z.string().trim().min(1).max(180), type: z.enum(basedTypes), target_table_id: z.uuid().optional() }),
+    description: "Create a typed field. Select fields can include choices. A linked field also creates a visible reciprocal field in its target table.",
+    inputSchema: z.object({ table_id: z.uuid(), name: z.string().trim().min(1).max(180), type: z.enum(basedTypes), target_table_id: z.uuid().optional(), options: z.array(z.string()).max(2000).optional() }),
     annotations: { readOnlyHint: false },
-  }, ({ table_id, name, type, target_table_id }) => guarded(async () => {
+  }, ({ table_id, name, type, target_table_id, options = [] }) => guarded(async () => {
     const table = await basedOne("based_tables", table_id);
     const sort_order = await basedNextOrder("based_fields", "table_id", table_id);
+    if (options.length && type !== "singleSelect" && type !== "multiSelect") throw new Error("Choices are only valid for select fields.");
     if (type !== "linkedRecord") {
-      const result = await client.from("based_fields").insert({ owner_id: ownerId, table_id, name, type, sort_order }).select().single();
+      const result = await client.from("based_fields").insert({ owner_id: ownerId, table_id, name, type, sort_order, options: normalizeBasedOptions(options) }).select().single();
       ensureNoError(result.error);
       return result.data;
     }
@@ -625,6 +627,22 @@ function createNotedServer(env: Env) {
       p_right_table_id: target_table_id, p_name: name, p_left_order: sort_order, p_right_order: rightOrder,
     });
     ensureNoError(result.error);
+    return result.data;
+  }));
+
+  server.registerTool("update_based_field_options", {
+    description: "Add or replace choices on an existing single-select or multi-select field. Append is the default and preserves existing choices. Use get_based_database to find field IDs and current choices.",
+    inputSchema: z.object({ field_id: z.uuid(), options: z.array(z.string()).max(2000), mode: z.enum(["append", "replace"]).default("append") }),
+    annotations: { readOnlyHint: false },
+  }, ({ field_id, options, mode }) => guarded(async () => {
+    const field = await basedOne("based_fields", field_id);
+    if (field.archived_at || (field.type !== "singleSelect" && field.type !== "multiSelect"))
+      throw new Error("Choices can only be changed on active select fields.");
+    const nextOptions = updatedBasedOptions(field.options as string[], options, mode);
+    const result = await client.from("based_fields").update({ options: nextOptions })
+      .eq("owner_id", ownerId).eq("id", field_id).select().maybeSingle();
+    ensureNoError(result.error);
+    if (!result.data) throw new Error("Field not found.");
     return result.data;
   }));
 

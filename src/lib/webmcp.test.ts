@@ -33,6 +33,7 @@ describe("WebMCP registration", () => {
       createBasedDatabase: noop,
       createBasedTable: noop,
       createBasedField: noop,
+      updateBasedFieldOptions: noop,
       createBasedRecord: noop,
       updateBasedRecord: noop,
       setBasedLink: noop,
@@ -62,6 +63,7 @@ describe("WebMCP registration", () => {
       "reply_to_comment",
       "resolve_comment",
       "set_based_link",
+      "update_based_field_options",
       "update_based_record",
       "update_document",
     ]);
