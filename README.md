@@ -6,7 +6,7 @@ Noted is a private React writing workspace for `noted.toddxburton.com`. It synch
 
 Click the Noted logo to switch to Based, the companion database workspace. Click the Based logo to return to notes. Based databases live in their own sidebar with folders; each database has table tabs and a full-width editable grid. The two tools share sign-in and visual styling but store their data separately. Existing inline database blocks in Noted remain available.
 
-Based supports text, number, date, select, multiselect, URL, checkbox, and two-way linked-record columns. The reciprocal linked column starts visible and can be hidden independently. Tables support search, filter, sort, group, column sizing, text wrap, and pages of 100 records. Records, columns, tables, folders, and databases can be archived and restored without deleting their data.
+Based supports text, number, date, select, multiselect, URL, checkbox, and two-way linked-record columns. The reciprocal linked column starts visible and can be hidden independently. Tables support search, filter, sort, group, column sizing, text wrap, and loading more rows as the grid scrolls. Records, columns, tables, folders, and databases can be archived and restored without deleting their data.
 
 Based has a separate JSON export/import flow and daily cloud snapshots. Import replaces only Based data. The `based_workspace` migration must be applied before using Based with Supabase; local preview mode stores Based data under a separate browser storage key. Browser and remote MCP endpoints expose Based discovery, schema creation, record queries and edits, and links.
 
@@ -46,6 +46,8 @@ For infrastructure-level recovery, enable Supabase database backups or point-in-
 ## Cloudflare and remote MCP
 
 The Worker serves Vite's static output as a single-page app, claims `noted.toddxburton.com` as its primary custom domain plus `notes.toddxburton.com` as a compatibility alias, and serves a stateless Streamable HTTP MCP endpoint at `/mcp`. The endpoint uses a dedicated bearer token and a server-only Supabase secret key. Every backend query is additionally restricted to `NOTES_OWNER_ID`.
+
+The remote MCP endpoint offers `create_comment` for new threads anchored to an exact quote in a note, alongside `reply_to_comment` for existing threads. Repeated quotes require an occurrence number or surrounding text to identify the intended passage.
 
 Set the Worker secrets before the first deployment:
 

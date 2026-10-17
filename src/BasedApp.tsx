@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { ArchiveRestore, ChevronDown, Download, Ellipsis, FolderPlus, Plus, Search, Upload, X } from "lucide-react";
+import { ArchiveRestore, ChevronDown, ChevronRight, Download, Ellipsis, FolderPlus, PanelLeftClose, PanelLeftOpen, Plus, Search, Upload, X } from "lucide-react";
+import { resizedColumnWidth } from "./lib/database";
 import {
   basedUpdate, createBasedDatabase, createBasedField, createBasedFolder,
   createBasedRecord, createBasedRelation, createBasedTable, exportBased, restoreBased,
@@ -29,6 +30,9 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const [links, setLinks] = useState<BasedLink[]>([]);
   const [relatedRecords, setRelatedRecords] = useState<Record<string, BasedRecord[]>>({});
   const [offset, setOffset] = useState(0);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [searchingSidebar, setSearchingSidebar] = useState(false);
+  const [resizeWidths, setResizeWidths] = useState<Record<string, number> | null>(null);
   const [search, setSearch] = useState("");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [filter, setFilter] = useState<Filter | null>(null);
@@ -47,6 +51,8 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const [question, setQuestion] = useState<{ label: string; value: string; choices?: string[] } | null>(null);
   const questionResolver = useRef<((value: string | null) => void) | null>(null);
   const rowRequestId = useRef(0);
+  const loadingRowsRef = useRef(false);
+  const resizeRef = useRef<{ fieldId: string; startX: number; startWidth: number; widths: Record<string, number> } | null>(null);
   function suggest(label: string, value = "", choices?: string[]): Promise<string | null> {
     return new Promise((resolve) => { questionResolver.current = resolve; setQuestion({ label, value, choices }); });
   }
@@ -83,6 +89,9 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
 
   const refreshRows = useCallback(async (selectedTableId: string, selectedOffset: number) => {
     const requestId = ++rowRequestId.current;
+    loadingRowsRef.current = true;
+    setLoadingRows(true);
+    try {
     const result = await loadBasedRecords(userId, selectedTableId, selectedOffset, 100, {
       search,
       filterFieldId: catalog.fields.some((field) => field.id === filter?.fieldId && field.table_id === selectedTableId) ? filter?.fieldId : undefined,
@@ -92,12 +101,13 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
       groupFieldId: catalog.fields.some((field) => field.id === groupFieldId && field.table_id === selectedTableId) ? groupFieldId : undefined,
     });
     if (requestId === rowRequestId.current) {
-      if (selectedOffset > 0 && result.records.length === 0) {
-        setOffset(Math.max(0, selectedOffset - 100));
-        return;
-      }
-      setRecords(result.records);
+      setRecords((current) => selectedOffset === 0 ? result.records : [
+        ...current, ...result.records.filter((record) => !current.some((item) => item.id === record.id)),
+      ]);
       setRecordCount(result.count);
+    }
+    } finally {
+      if (requestId === rowRequestId.current) { loadingRowsRef.current = false; setLoadingRows(false); }
     }
   }, [userId, search, filter?.fieldId, filter?.mode, filter?.value, sortFieldId, sortDescending, groupFieldId, catalog.fields]);
 
@@ -123,6 +133,19 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     void refreshRows(table.id, offset).catch((caught) => { if (active) setError(String(caught)); });
     return () => { active = false; };
   }, [table?.id, offset, refreshRows, userId]);
+
+  function loadMoreRows(element: HTMLDivElement) {
+    if (loadingRowsRef.current || !table || records.length >= recordCount || !recordCount) return;
+    if (element.scrollTop + element.clientHeight >= element.scrollHeight - 120) {
+      loadingRowsRef.current = true;
+      setOffset(records.length);
+    }
+  }
+
+  useEffect(() => {
+    const element = document.querySelector<HTMLDivElement>(".based-grid-scroll");
+    if (element) loadMoreRows(element);
+  }, [records.length, recordCount, table?.id]);
 
   useEffect(() => {
     if (!table) { setArchivedRecords([]); return; }
@@ -233,7 +256,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     if (!table) return;
     await run(async () => {
       await createBasedRecord(userId, table.id, await nextBasedRecordOrder(userId, table.id));
-      await refreshRows(table.id, offset);
+      await reloadRows();
     });
   }
   async function archiveFolder(folder: BasedFolder) {
@@ -270,11 +293,37 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
       ? { ...item, cells: { ...item.cells, [field.id]: value } } : item));
     await run(async () => {
       try { await mergeBasedRecordCells(userId, record.id, { [field.id]: value }); }
-      catch (caught) { if (table) await refreshRows(table.id, offset); throw caught; }
+      catch (caught) { await reloadRows(); throw caught; }
     });
+  }
+  async function reloadRows() {
+    if (!table) return;
+    if (offset === 0) await refreshRows(table.id, 0);
+    else setOffset(0);
   }
   async function saveField(field: BasedField, changes: Partial<BasedField>) {
     await run(async () => { await basedUpdate<BasedField>("based_fields", field.id, changes, userId); await refreshCatalog(); });
+  }
+  function startColumnResize(event: React.PointerEvent<HTMLSpanElement>, fieldId: string) {
+    if (event.button !== 0) return;
+    const headers = event.currentTarget.closest("table")?.querySelectorAll<HTMLElement>("th[data-field-id]");
+    const widths = Object.fromEntries(Array.from(headers ?? [], (header) => [header.dataset.fieldId!, header.getBoundingClientRect().width]));
+    if (!widths[fieldId]) return;
+    event.preventDefault();
+    resizeRef.current = { fieldId, startX: event.clientX, startWidth: widths[fieldId], widths };
+    setResizeWidths(widths);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function finishColumnResize(event: React.PointerEvent<HTMLSpanElement>, cancelled = false) {
+    const resizing = resizeRef.current;
+    if (!resizing) return;
+    resizeRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setResizeWidths(null);
+    if (!cancelled) {
+      const field = fields.find((item) => item.id === resizing.fieldId);
+      if (field) void saveField(field, { width: resizedColumnWidth(resizing.startWidth, event.clientX - resizing.startX) });
+    }
   }
   async function moveField(field: BasedField, direction: -1 | 1) {
     const index = fields.findIndex((item) => item.id === field.id);
@@ -369,6 +418,14 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }
 
   const displayed = records;
+  const canvas = typeof document !== "undefined" ? document.createElement("canvas") : null;
+  const context = canvas?.getContext("2d");
+  if (context) context.font = "13px Inter, sans-serif";
+  const measure = (value: string) => context?.measureText(value).width ?? value.length * 7;
+  const fieldWidths = visibleFields.map((field) => resizeWidths?.[field.id] ?? (field.width == null
+    ? resizedColumnWidth(Math.max(measure(field.name || "Untitled") + 48,
+      ...records.map((record) => measure(cellText(record.cells[field.id]).split("\n").sort((a, b) => b.length - a.length)[0] ?? "") + 28)), 0)
+    : resizedColumnWidth(field.width, 0)));
 
   function download(name: string, value: unknown) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
@@ -389,23 +446,24 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const archivedDatabases = catalog.databases.filter((item) => item.archived_at);
   return <div className={`app-shell based-app ${railVisible ? "" : "rail-hidden"} ${mobileRailOpen ? "mobile-rail-open" : ""}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
     <button type="button" className="mobile-rail-backdrop" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)} />
-    <aside className="document-rail" aria-label="Based databases">
+    <aside className="document-rail" aria-label="Based databases" id="based-rail">
       <div className="rail-actions">
         <button type="button" className="rail-brand based-brand" title="Switch to Noted" onClick={onSwitch}>Based</button>
         <div className="rail-tools">
-          <button type="button" className="icon-button" aria-label="Hide sidebar" onClick={() => { setRailVisible(false); localStorage.setItem("noted-sidebar-visible", "false"); }}>☷</button>
-          <button type="button" className="icon-button" aria-label="New folder" onClick={() => void addFolder()}><FolderPlus size={17} /></button>
-          <button type="button" className="new-note" aria-label="New database" onClick={() => void addDatabase()}><Plus size={18} /></button>
+          <button type="button" className="icon-button" aria-label="Hide sidebar" title="Hide sidebar" onClick={() => { setRailVisible(false); localStorage.setItem("noted-sidebar-visible", "false"); }}><PanelLeftClose size={18} /></button>
+          <button type="button" className={`icon-button ${searchingSidebar ? "is-active" : ""}`} aria-label="Search databases" title="Search databases" onClick={() => setSearchingSidebar((value) => !value)}><Search size={18} /></button>
+          <button type="button" className="new-note" aria-label="New database" title="New database" onClick={() => void addDatabase()}><Plus size={18} /></button>
           <button type="button" className="mobile-rail-close" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)}><X size={18} /></button>
         </div>
       </div>
-      <div className="search-box"><Search size={15} /><input aria-label="Search databases" placeholder="Search databases" value={sidebarSearch} onChange={(event) => setSidebarSearch(event.target.value)} /></div>
+      {searchingSidebar && <div className="search-box"><Search size={15} /><input autoFocus aria-label="Search databases" placeholder="Search databases" value={sidebarSearch} onChange={(event) => setSidebarSearch(event.target.value)} />{sidebarSearch && <button aria-label="Clear search" onClick={() => setSidebarSearch("")}><X size={14} /></button>}</div>}
       <div className="document-list">
+        <div className="rail-section-heading"><p className="rail-label">Folders</p><button type="button" aria-label="Create folder" title="Create folder" onClick={() => void addFolder()}><FolderPlus size={16} /></button></div>
         {order(catalog.folders.filter((item) => !item.archived_at)).map((folder) => <div key={folder.id} className="based-folder">
           <div className="based-folder-heading"><button className="based-folder-toggle" aria-label={`${folder.collapsed ? "Expand" : "Collapse"} ${folder.name}`}
             aria-expanded={!folder.collapsed} onClick={() => void run(async () => {
               await basedUpdate<BasedFolder>("based_folders", folder.id, { collapsed: !folder.collapsed }, userId); await refreshCatalog();
-            })}>{folder.collapsed ? "▸" : "▾"} {folder.name}</button><button aria-label={`New database in ${folder.name}`} onClick={() => void addDatabase(folder.id)}><Plus size={14} /></button>
+            })}>{folder.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}<span>{folder.name}</span></button><button className="based-folder-new" aria-label={`New database in ${folder.name}`} title={`New database in ${folder.name}`} onClick={() => void addDatabase(folder.id)}><Plus size={16} /></button>
             <button aria-label={`Folder actions for ${folder.name}`} onClick={async () => {
               const action = await suggest("Folder action", "rename", ["rename", "move up", "move down", "archive"]);
               if (action === "archive") { void archiveFolder(folder); return; }
@@ -437,7 +495,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     <main className="workspace">
       <header className="workspace-header">
         <div className="workspace-location">
-          {!railVisible && <button type="button" className="sidebar-show" aria-label="Show sidebar" onClick={() => { setRailVisible(true); localStorage.setItem("noted-sidebar-visible", "true"); }}>☷</button>}
+          {!railVisible && <button type="button" className="sidebar-show" aria-label="Show sidebar" title="Show sidebar" onClick={() => { setRailVisible(true); localStorage.setItem("noted-sidebar-visible", "true"); }}><PanelLeftOpen size={18} /></button>}
           <span className="document-breadcrumb desktop-breadcrumb">{database?.name ?? "Based"}</span>
         </div>
         <button type="button" className="document-breadcrumb mobile-rail-toggle" aria-label="Open sidebar" onClick={() => setMobileRailOpen(true)}><span>{database?.name ?? "Based"}</span><ChevronDown size={14} /></button>
@@ -495,8 +553,9 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
             <button aria-pressed={wrap} onClick={() => setWrap((current) => !current)}>Wrap {wrap ? "on" : "off"}</button>
             <button onClick={() => void addField()}>＋ Column</button>
           </div>
-          <div className="based-grid-scroll"><table className={`based-grid ${wrap ? "is-wrapped" : ""}`}>
-            <thead><tr><th className="based-row-number">#</th>{visibleFields.map((field) => <th key={field.id} style={{ width: field.width ?? 210 }}>
+          <div className="based-grid-scroll" onScroll={(event) => loadMoreRows(event.currentTarget)}><table className={`based-grid ${wrap ? "is-wrapped" : ""}`} style={{ width: fieldWidths.reduce((sum, width) => sum + width, 84) }}>
+            <colgroup><col style={{ width: 44 }} />{visibleFields.map((field, index) => <col key={field.id} style={{ width: fieldWidths[index] }} />)}<col style={{ width: 40 }} /></colgroup>
+            <thead><tr><th className="based-row-number">#</th>{visibleFields.map((field) => <th key={field.id} data-field-id={field.id}>
               <button className="based-field-name" onClick={async () => {
                 const name = await suggest("Rename column", field.name); if (name) void saveField(field, { name });
               }}>{field.name}<ChevronDown size={13} /></button>
@@ -512,25 +571,31 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
                 else if (action === "archive" && field.type !== "itemName" && await confirmAction(`Archive column “${field.name}”? Its values will be kept.`, "Archive"))
                   void saveField(field, { archived_at: new Date().toISOString() });
               }}><Ellipsis size={13} /></button>
+              <span className="database-column-resize" role="separator" aria-label={`Resize ${field.name} column`}
+                aria-orientation="vertical" aria-valuenow={Math.round(fieldWidths[visibleFields.indexOf(field)])}
+                aria-valuemin={120} aria-valuemax={420} tabIndex={0}
+                onPointerDown={(event) => startColumnResize(event, field.id)}
+                onDoubleClick={() => void saveField(field, { width: null })}
+                onPointerMove={(event) => { const resizing = resizeRef.current; if (resizing) setResizeWidths({ ...resizing.widths, [resizing.fieldId]: resizedColumnWidth(resizing.startWidth, event.clientX - resizing.startX) }); }}
+                onPointerUp={(event) => finishColumnResize(event)}
+                onPointerCancel={(event) => finishColumnResize(event, true)}
+                onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void saveField(field, { width: resizedColumnWidth(fieldWidths[visibleFields.indexOf(field)], event.key === "ArrowRight" ? 10 : -10) }); } }} />
             </th>)}<th className="based-add-column"><button onClick={() => void addField()} aria-label="Add column">＋</button></th></tr></thead>
             <tbody>{displayed.map((record, index) => <Fragment key={record.id}>
               {groupFieldId && (index === 0 || cellText(displayed[index - 1]?.cells[groupFieldId]) !== cellText(record.cells[groupFieldId])) &&
                 <tr className="based-group-end"><td colSpan={visibleFields.length + 2}>{cellText(record.cells[groupFieldId]) || "Empty"}</td></tr>}
               <tr>
-              <td className="based-row-number">{offset + index + 1}</td>
+              <td className="based-row-number">{index + 1}</td>
               {visibleFields.map((field) => <td key={field.id}>{renderCell(record, field)}</td>)}
-              <td className="based-row-actions"><button aria-label={`Archive row ${offset + index + 1}`} onClick={async () => {
+              <td className="based-row-actions"><button aria-label={`Archive row ${index + 1}`} onClick={async () => {
                 if (!await confirmAction("Archive this record?", "Archive")) return;
-                void run(async () => { await basedUpdate<BasedRecord>("based_records", record.id, { archived_at: new Date().toISOString() }, userId); await refreshRows(table.id, offset); setArchivedRecords(await loadArchivedBasedRecords(userId, table.id)); });
+                void run(async () => { await basedUpdate<BasedRecord>("based_records", record.id, { archived_at: new Date().toISOString() }, userId); await reloadRows(); setArchivedRecords(await loadArchivedBasedRecords(userId, table.id)); });
               }}>×</button></td>
             </tr></Fragment>)}
               {!displayed.length && <tr><td colSpan={visibleFields.length + 2} className="based-no-rows">No rows</td></tr>}
             </tbody>
           </table></div>
-          <div className="based-grid-footer"><button onClick={() => void addRecord()}>＋ New row</button><span>{recordCount} records</span>
-            <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>Previous</button>
-            <button disabled={offset + 100 >= recordCount} onClick={() => setOffset(offset + 100)}>Next</button>
-          </div>
+          <div className="based-grid-footer"><button onClick={() => void addRecord()}>＋ New row</button><span>{records.length} of {recordCount} records{loadingRows ? " · Loading…" : ""}</span></div>
           {fields.some((field) => field.hidden) && <div className="based-hidden-fields">Hidden columns: {fields.filter((field) => field.hidden).map((field) => <button key={field.id} onClick={() => void saveField(field, { hidden: false })}>{field.name} ＋</button>)}</div>}
           {archivedFields.length > 0 && <details className="based-hidden-fields"><summary>Archived columns ({archivedFields.length})</summary>
             {archivedFields.map((field) => <button key={field.id} onClick={() => void saveField(field, { archived_at: null })}>{field.name} <ArchiveRestore size={12} /></button>)}
@@ -538,7 +603,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
           {archivedRecords.length > 0 && <details className="based-hidden-fields"><summary>Archived records ({archivedRecords.length})</summary>
             {archivedRecords.map((record) => <button key={record.id} aria-label={`Restore ${recordName(record)}`} onClick={() => void run(async () => {
               await basedUpdate<BasedRecord>("based_records", record.id, { archived_at: null }, userId);
-              await refreshRows(table.id, offset); setArchivedRecords(await loadArchivedBasedRecords(userId, table.id));
+              await reloadRows(); setArchivedRecords(await loadArchivedBasedRecords(userId, table.id));
             })}>{recordName(record)} <ArchiveRestore size={12} /></button>)}
           </details>}
         </div>}

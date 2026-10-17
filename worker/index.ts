@@ -2,6 +2,7 @@ import { McpServer, preloadSchemas } from "@modelcontextprotocol/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { resolveCommentAnchor } from "./commentAnchor";
 
 preloadSchemas();
 
@@ -358,6 +359,42 @@ function createNotedServer(env: Env) {
         ...comment,
         replies: (repliesResult.data ?? []).filter((reply) => reply.comment_id === comment.id),
       }));
+    }),
+  );
+
+  server.registerTool(
+    "create_comment",
+    {
+      description: "Create a new comment thread anchored to an exact quote in an active note. If the quote appears more than once, provide its occurrence or surrounding context. @mentions in the comment create notifications.",
+      inputSchema: z.object({
+        document_id: z.uuid(),
+        body: z.string().trim().min(1).max(10_000),
+        exact_quote: z.string().min(1).max(20_000),
+        occurrence: z.number().int().min(1).optional(),
+        prefix: z.string().max(500).optional(),
+        suffix: z.string().max(500).optional(),
+        agent_name: z.string().trim().min(1).max(40).default("GPT"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    ({ document_id, body, exact_quote, occurrence, prefix, suffix, agent_name }) => guarded(async () => {
+      const documentResult = await client.from("documents").select("id,plain_text,project_id")
+        .eq("owner_id", ownerId).eq("id", document_id)
+        .is("deleted_at", null).is("archived_at", null).maybeSingle();
+      ensureNoError(documentResult.error);
+      if (!documentResult.data) throw new Error("Document not found.");
+      if (documentResult.data.project_id) await getActiveProject(client, ownerId, documentResult.data.project_id);
+      const anchor = resolveCommentAnchor(documentResult.data.plain_text, exact_quote, occurrence, prefix, suffix);
+      const result = await client.from("comments").insert({
+        owner_id: ownerId,
+        document_id,
+        body,
+        exact_quote,
+        ...anchor,
+        author_name: agent_name,
+      }).select().single();
+      ensureNoError(result.error);
+      return result.data;
     }),
   );
 
