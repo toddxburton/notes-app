@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Editor, JSONContent } from "@tiptap/core";
 import type { Session } from "@supabase/supabase-js";
@@ -79,6 +79,7 @@ import {
   supabase,
 } from "./lib/supabase";
 import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
+import { clearWorkspaceCache, readWorkspaceCache, writeWorkspaceCache } from "./lib/workspaceCache";
 import BasedApp from "./BasedApp";
 import { basedGet, createBasedDatabase, createBasedField, createBasedRecord,
   createBasedRelation, createBasedTable, loadBasedCatalog, loadBasedRecords, mergeBasedRecordCells, nextBasedRecordOrder, setBasedLink,
@@ -101,7 +102,8 @@ type SaveState = "saved" | "pending" | "saving" | "error";
 type Selection = { from: number; to: number; quote: string } | null;
 type ProjectDropTarget = { projectId: string; position: "before" | "after" } | null;
 type RailContextMenu = { kind: "project" | "document"; id: string; x: number; y: number } | null;
-type RailActionDialog = { kind: "create-project" | "rename-project" | "rename-document" | "archive-project" | "archive-document"; id?: string; value: string } | null;
+type RailActionDialog = { kind: "create-project" | "archive-project" | "archive-document"; id?: string; value: string } | null;
+type InlineRename = { kind: "project" | "document"; id: string; value: string } | null;
 type SlashMenuState = SlashCommandMatch & { top: number; left: number; selectedIndex: number };
 type BlockDropTarget = { beforeIndex: number; top: number };
 
@@ -170,6 +172,31 @@ function IconButton({
   );
 }
 
+function RailRenameInput({ label, value, onChange, onCommit, onCancel }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+}) {
+  return <input
+    autoFocus
+    className="rail-rename-input"
+    aria-label={label}
+    value={value}
+    maxLength={180}
+    onChange={(event) => onChange(event.target.value)}
+    onBlur={onCommit}
+    onClick={(event) => event.stopPropagation()}
+    onPointerDown={(event) => event.stopPropagation()}
+    onKeyDown={(event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") { event.preventDefault(); onCommit(); }
+      if (event.key === "Escape") { event.preventDefault(); onCancel(); }
+    }}
+  />;
+}
+
 function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -235,6 +262,7 @@ export default function App() {
   const [displayName, setDisplayName] = useState("You");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadedOwner, setLoadedOwner] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [error, setError] = useState("");
   const [searching, setSearching] = useState(false);
@@ -255,6 +283,7 @@ export default function App() {
   const [projectEndDropTarget, setProjectEndDropTarget] = useState(false);
   const [railContextMenu, setRailContextMenu] = useState<RailContextMenu>(null);
   const [railActionDialog, setRailActionDialog] = useState<RailActionDialog>(null);
+  const [inlineRename, setInlineRename] = useState<InlineRename>(null);
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
   const [blockHandle, setBlockHandle] = useState<{ index: number; top: number } | null>(null);
   const [blockDropTarget, setBlockDropTarget] = useState<BlockDropTarget | null>(null);
@@ -276,7 +305,7 @@ export default function App() {
   const displayNameRef = useRef(displayName);
   const userIdRef = useRef(userId);
   const saveTimer = useRef<number | null>(null);
-  const refreshing = useRef(false);
+  const refreshing = useRef<string | null>(null);
   const pendingUpdates = useRef(new Map<string, DocumentUpdates>());
   const saveInFlight = useRef<Promise<void> | null>(null);
   const editorDocumentId = useRef<string | null>(null);
@@ -551,6 +580,20 @@ export default function App() {
     displayName: displayNameRef.current,
   }), []);
 
+  useEffect(() => {
+    const owner = userId ?? (isSupabaseConfigured ? null : "local-user");
+    if (!owner || loadedOwner !== owner || loading || !documents.length) return;
+    const persist = () => writeWorkspaceCache(owner, {
+      documents, projects, comments, replies, notifications, displayName,
+    }, activeId);
+    const timer = window.setTimeout(persist, 250);
+    window.addEventListener("pagehide", persist);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pagehide", persist);
+    };
+  }, [userId, loadedOwner, loading, documents, projects, comments, replies, notifications, displayName, activeId]);
+
   const applyLocalDocumentUpdate = useCallback((documentId: string, updates: DocumentUpdates) => {
     const current = documentsRef.current;
     const existing = current.find((document) => document.id === documentId);
@@ -564,8 +607,9 @@ export default function App() {
 
   const refreshWorkspace = useCallback(async (quiet = false) => {
     if (isSupabaseConfigured && !userIdRef.current) return;
-    if (refreshing.current) return;
-    refreshing.current = true;
+    const owner = userIdRef.current ?? "local-user";
+    if (refreshing.current === owner) return;
+    refreshing.current = owner;
     if (!quiet) setLoading(true);
     setError("");
     try {
@@ -580,12 +624,14 @@ export default function App() {
         );
         data = { ...data, documents: [welcome] };
       }
+      if ((userIdRef.current ?? "local-user") !== owner) return;
       setDocuments(data.documents);
       setProjects(data.projects);
       setComments(data.comments);
       setReplies(data.replies);
       setNotifications(data.notifications);
       setDisplayName(data.displayName);
+      setLoadedOwner(owner);
       const availableDocuments = data.documents.filter((item) => isAvailableDocument(item, data.projects));
       const rememberedId = localStorage.getItem(lastViewedDocumentKey(userIdRef.current));
       setActiveId((current) => current && availableDocuments.some((item) => item.id === current)
@@ -598,10 +644,12 @@ export default function App() {
         await saveCloudBackup(userIdRef.current, createBackup(data));
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load the workspace.");
+      if ((userIdRef.current ?? "local-user") === owner) {
+        setError(caught instanceof Error ? caught.message : "Unable to load the workspace.");
+      }
     } finally {
-      refreshing.current = false;
-      if (!quiet) setLoading(false);
+      if (refreshing.current === owner) refreshing.current = null;
+      if (!quiet && (userIdRef.current ?? "local-user") === owner) setLoading(false);
     }
   }, []);
 
@@ -616,7 +664,10 @@ export default function App() {
       setLoading(false);
     });
     if (!supabase) return;
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === "SIGNED_OUT" && userIdRef.current) clearWorkspaceCache(userIdRef.current);
+      setSession(nextSession);
+    });
     return () => data.subscription.unsubscribe();
   }, [refreshWorkspace]);
 
@@ -625,7 +676,29 @@ export default function App() {
       if (session !== undefined) setLoading(false);
       return;
     }
-    void refreshWorkspace();
+    const owner = userId ?? "local-user";
+    if (loadedOwner !== owner) {
+      const cached = readWorkspaceCache(owner);
+      if (cached) {
+        const drafts = new Map(getDocumentDrafts(userId).map((draft) => [draft.id, draft]));
+        const cachedDocuments = cached.data.documents.map((document) =>
+          drafts.has(document.id) ? { ...document, ...drafts.get(document.id), revision: document.revision } : document);
+        setDocuments(cachedDocuments);
+        setProjects(cached.data.projects);
+        setComments(cached.data.comments);
+        setReplies(cached.data.replies);
+        setNotifications(cached.data.notifications);
+        setDisplayName(cached.data.displayName);
+        const available = cachedDocuments.filter((item) => isAvailableDocument(item, cached.data.projects));
+        const rememberedId = localStorage.getItem(lastViewedDocumentKey(userId));
+        setActiveId(available.find((item) => item.id === rememberedId)?.id
+          ?? available.find((item) => item.id === cached.activeId)?.id
+          ?? available[0]?.id ?? null);
+        setLoadedOwner(owner);
+        setLoading(false);
+      }
+      void refreshWorkspace(Boolean(cached));
+    }
   }, [session, refreshWorkspace]);
 
   useEffect(() => {
@@ -649,7 +722,7 @@ export default function App() {
     };
   }, [userId, refreshWorkspace]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editor || !activeDocument) return;
     const changedDocument = editorDocumentId.current !== activeDocument.id;
     const displayed = JSON.stringify(editor.getJSON());
@@ -1542,6 +1615,9 @@ export default function App() {
     setRailVisible(localStorage.getItem(railVisibleStorageKey) !== "false");
     setTool("noted");
   }} />;
+  if (loadedOwner !== (userId ?? "local-user")) {
+    return <main className="loading-page">{error || "Opening your workspace…"}</main>;
+  }
 
   function selectDocument(documentId: string) {
     setActiveId(documentId);
@@ -1552,7 +1628,7 @@ export default function App() {
     const dialog = railActionDialog;
     if (!dialog) return;
     const value = dialog.value.trim();
-    if ((dialog.kind === "create-project" || dialog.kind.startsWith("rename-")) && !value) return;
+    if (dialog.kind === "create-project" && !value) return;
     setRailActionDialog(null);
     if (dialog.kind === "create-project") {
       void handleNewProject(value);
@@ -1561,14 +1637,25 @@ export default function App() {
     if (dialog.kind.endsWith("project")) {
       const project = projectsRef.current.find((item) => item.id === dialog.id);
       if (!project) return;
-      if (dialog.kind === "rename-project") void handleRenameProject(project, value);
-      else void handleArchiveProject(project);
+      void handleArchiveProject(project);
       return;
     }
     const document = documentsRef.current.find((item) => item.id === dialog.id);
     if (!document) return;
-    if (dialog.kind === "rename-document") void handleRenameDocument(document, value);
-    else void handleArchiveDocument(document);
+    void handleArchiveDocument(document);
+  }
+
+  function finishInlineRename() {
+    const rename = inlineRename;
+    setInlineRename(null);
+    if (!rename?.value.trim()) return;
+    if (rename.kind === "project") {
+      const project = projectsRef.current.find((item) => item.id === rename.id);
+      if (project) void handleRenameProject(project, rename.value);
+    } else {
+      const document = documentsRef.current.find((item) => item.id === rename.id);
+      if (document) void handleRenameDocument(document, rename.value);
+    }
   }
 
   return (
@@ -1594,7 +1681,7 @@ export default function App() {
               : documentsRef.current.find((document) => document.id === railContextMenu.id);
             setRailContextMenu(null);
             if (!item) return;
-            setRailActionDialog({ kind: railContextMenu.kind === "project" ? "rename-project" : "rename-document", id: item.id, value: railContextMenu.kind === "project" ? (item as NoteProject).name : (item as NoteDocument).title });
+            setInlineRename({ kind: railContextMenu.kind, id: item.id, value: railContextMenu.kind === "project" ? (item as NoteProject).name : (item as NoteDocument).title });
           }}>Rename</button>
           <button type="button" role="menuitem" onClick={() => {
             const item = railContextMenu.kind === "project"
@@ -1612,16 +1699,16 @@ export default function App() {
             className="rail-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={railActionDialog.kind === "create-project" ? "Create project" : railActionDialog.kind.startsWith("rename-") ? "Rename" : "Archive"}
+            aria-label={railActionDialog.kind === "create-project" ? "Create project" : "Archive"}
             onSubmit={(event) => { event.preventDefault(); submitRailActionDialog(); }}
           >
-            <h2>{railActionDialog.kind === "create-project" ? "New project" : railActionDialog.kind.startsWith("rename-") ? "Rename" : "Archive"}</h2>
+            <h2>{railActionDialog.kind === "create-project" ? "New project" : "Archive"}</h2>
             {railActionDialog.kind.startsWith("archive-") ? (
               <p>Archive “{railActionDialog.value}”? You can restore it from Archived.</p>
             ) : (
               <input
                 autoFocus
-                aria-label={railActionDialog.kind === "rename-document" ? "Note name" : "Project name"}
+                aria-label="Project name"
                 value={railActionDialog.value}
                 onChange={(event) => setRailActionDialog((current) => current ? { ...current, value: event.target.value } : null)}
                 maxLength={180}
@@ -1629,8 +1716,8 @@ export default function App() {
             )}
             <div className="rail-dialog-actions">
               <button type="button" onClick={() => setRailActionDialog(null)}>Cancel</button>
-              <button type="submit" className="rail-dialog-primary" disabled={!railActionDialog.kind.startsWith("archive-") && !railActionDialog.value.trim()}>
-                {railActionDialog.kind === "create-project" ? "Create" : railActionDialog.kind.startsWith("rename-") ? "Save" : "Archive"}
+              <button type="submit" className="rail-dialog-primary" disabled={railActionDialog.kind === "create-project" && !railActionDialog.value.trim()}>
+                {railActionDialog.kind === "create-project" ? "Create" : "Archive"}
               </button>
             </div>
           </form>
@@ -1691,7 +1778,7 @@ export default function App() {
               >
                 <div
                   className="project-heading"
-                  draggable
+                  draggable={inlineRename?.id !== project.id}
                   onClick={() => void handleProjectCollapsed(project)}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -1730,9 +1817,13 @@ export default function App() {
                   >
                     {project.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
                   </button>
-                  <button type="button" className="project-title" aria-expanded={!project.collapsed} title={project.collapsed ? "Expand project" : "Collapse project"}>
-                    {project.name}
-                  </button>
+                  {inlineRename?.kind === "project" && inlineRename.id === project.id ?
+                    <RailRenameInput label="Project name" value={inlineRename.value}
+                      onChange={(value) => setInlineRename((current) => current ? { ...current, value } : null)}
+                      onCommit={finishInlineRename} onCancel={() => setInlineRename(null)} /> :
+                    <button type="button" className="project-title" aria-expanded={!project.collapsed} title={project.collapsed ? "Expand project" : "Collapse project"}>
+                      {project.name}
+                    </button>}
                   <button type="button" className="project-new-note" aria-label={`New note in ${project.name}`} onClick={(event) => { event.stopPropagation(); void handleNewDocument(project.id); }}>
                     <Plus size={16} />
                   </button>
@@ -1740,7 +1831,7 @@ export default function App() {
                 {!project.collapsed && projectDocuments.map((document) => (
                   <div
                     className={`document-row project-document ${document.id === activeId ? "is-selected" : ""}`}
-                    draggable
+                    draggable={inlineRename?.id !== document.id}
                     onContextMenu={(event) => {
                       event.preventDefault();
                       showRailContextMenu("document", document.id, event.clientX, event.clientY);
@@ -1751,7 +1842,11 @@ export default function App() {
                     onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), project.id, document.id); }}
                     key={document.id}
                   >
-                    <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
+                    {inlineRename?.kind === "document" && inlineRename.id === document.id ?
+                      <RailRenameInput label="Note name" value={inlineRename.value}
+                        onChange={(value) => setInlineRename((current) => current ? { ...current, value } : null)}
+                        onCommit={finishInlineRename} onCancel={() => setInlineRename(null)} /> :
+                      <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>}
                   </div>
                 ))}
               </section>
@@ -1787,7 +1882,7 @@ export default function App() {
           {ungroupedDocuments.map((document) => (
             <div
               className={`document-row ${document.id === activeId ? "is-selected" : ""}`}
-              draggable
+              draggable={inlineRename?.id !== document.id}
               onContextMenu={(event) => {
                 event.preventDefault();
                 showRailContextMenu("document", document.id, event.clientX, event.clientY);
@@ -1798,7 +1893,11 @@ export default function App() {
               onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void arrangeDocument(droppedDocumentId(event), null, document.id); }}
               key={document.id}
             >
-              <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>
+              {inlineRename?.kind === "document" && inlineRename.id === document.id ?
+                <RailRenameInput label="Note name" value={inlineRename.value}
+                  onChange={(value) => setInlineRename((current) => current ? { ...current, value } : null)}
+                  onCommit={finishInlineRename} onCancel={() => setInlineRename(null)} /> :
+                <button type="button" onClick={() => selectDocument(document.id)}>{document.title}</button>}
             </div>
           ))}
           {!ungroupedDocuments.length && <p className="empty-list">No ungrouped notes.</p>}

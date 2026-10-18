@@ -36,6 +36,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const [search, setSearch] = useState("");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [filter, setFilter] = useState<Filter | null>(null);
+  const [filterOpen, setFilterOpen] = useState(false);
   const [sortFieldId, setSortFieldId] = useState("");
   const [sortDescending, setSortDescending] = useState(false);
   const [groupFieldId, setGroupFieldId] = useState("");
@@ -53,6 +54,8 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const rowRequestId = useRef(0);
   const loadingRowsRef = useRef(false);
   const resizeRef = useRef<{ fieldId: string; startX: number; startWidth: number; widths: Record<string, number> } | null>(null);
+  const filterButtonRef = useRef<HTMLButtonElement | null>(null);
+  const filterPopoverRef = useRef<HTMLDivElement | null>(null);
   function suggest(label: string, value = "", choices?: string[]): Promise<string | null> {
     return new Promise((resolve) => { questionResolver.current = resolve; setQuestion({ label, value, choices }); });
   }
@@ -74,7 +77,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const visibleFields = fields.filter((field) => !field.hidden);
   const queryableFields = fields.filter((field) => field.type !== "linkedRecord");
   function clearTableControls() {
-    setSearch(""); setFilter(null); setSortFieldId(""); setSortDescending(false);
+    setSearch(""); setFilter(null); setFilterOpen(false); setSortFieldId(""); setSortDescending(false);
     setGroupFieldId(""); setOffset(0); setCellMenu(null);
   }
   function openTable(id: string) { clearTableControls(); setTableId(id); }
@@ -110,6 +113,26 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
       if (requestId === rowRequestId.current) { loadingRowsRef.current = false; setLoadingRows(false); }
     }
   }, [userId, search, filter?.fieldId, filter?.mode, filter?.value, sortFieldId, sortDescending, groupFieldId, catalog.fields]);
+
+  useEffect(() => {
+    if (!filterOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!filterPopoverRef.current?.contains(event.target as Node) &&
+          !filterButtonRef.current?.contains(event.target as Node)) setFilterOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setFilterOpen(false); };
+    const closeOnScroll = () => setFilterOpen(false);
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    window.addEventListener("resize", closeOnScroll);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+      window.removeEventListener("resize", closeOnScroll);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [filterOpen]);
 
   useEffect(() => {
     let active = true;
@@ -541,12 +564,8 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
               void run(async () => { await basedUpdate<BasedTable>("based_tables", table.id, { archived_at: new Date().toISOString() }, userId); await refreshCatalog(); });
             }}>Archive table</button>
             <input aria-label="Search rows" placeholder="Search rows" value={search} onChange={(event) => { setSearch(event.target.value); setOffset(0); }} />
-            <select aria-label="Filter field" value={filter?.fieldId ?? ""} onChange={(event) => { setFilter(event.target.value ? { fieldId: event.target.value, mode: "contains", value: "" } : null); setOffset(0); }}>
-              <option value="">Filter</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
-            </select>
-            {filter && <><select aria-label="Filter condition" value={filter.mode} onChange={(event) => { setFilter({ ...filter, mode: event.target.value as Filter["mode"] }); setOffset(0); }}>
-              <option value="contains">Contains</option><option value="equals">Is</option><option value="empty">Is empty</option><option value="notEmpty">Is not empty</option></select>
-              {(filter.mode === "contains" || filter.mode === "equals") && <input aria-label="Filter value" value={filter.value} onChange={(event) => { setFilter({ ...filter, value: event.target.value }); setOffset(0); }} />}</>}
+            <button ref={filterButtonRef} type="button" className={filter ? "is-active" : ""} aria-label="Filter records" aria-expanded={filterOpen}
+              onClick={() => setFilterOpen((open) => !open)}>Filter{filter ? " · 1" : ""}</button>
             <select aria-label="Sort field" value={sortFieldId} onChange={(event) => { setSortFieldId(event.target.value); setOffset(0); }}><option value="">Sort</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
             {sortFieldId && <button onClick={() => { setSortDescending((current) => !current); setOffset(0); }}>{sortDescending ? "↓" : "↑"}</button>}
             <select aria-label="Group field" value={groupFieldId} onChange={(event) => { setGroupFieldId(event.target.value); setOffset(0); }}><option value="">Group</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
@@ -609,6 +628,21 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
         </div>}
       </>}
     </main>
+    {filterOpen && table && <div ref={filterPopoverRef} className="based-filter-popover" role="dialog" aria-label="Filter records"
+      style={{ left: Math.max(12, Math.min(filterButtonRef.current?.getBoundingClientRect().left ?? 12, window.innerWidth - 356)),
+        top: Math.max(12, Math.min((filterButtonRef.current?.getBoundingClientRect().bottom ?? 50) + 6, window.innerHeight - 220)) }}>
+      <div className="based-filter-heading"><strong>Filter records</strong><button type="button" aria-label="Close filters" onClick={() => setFilterOpen(false)}><X size={15} /></button></div>
+      <p>Show records where</p>
+      <div className="based-filter-condition">
+        <select autoFocus aria-label="Filter field" value={filter?.fieldId ?? ""} onChange={(event) => { setFilter(event.target.value ? { fieldId: event.target.value, mode: "contains", value: "" } : null); setOffset(0); }}>
+          <option value="">Choose a field</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
+        </select>
+        {filter && <><select aria-label="Filter condition" value={filter.mode} onChange={(event) => { setFilter({ ...filter, mode: event.target.value as Filter["mode"] }); setOffset(0); }}>
+          <option value="contains">contains</option><option value="equals">is</option><option value="empty">is empty</option><option value="notEmpty">is not empty</option></select>
+          {(filter.mode === "contains" || filter.mode === "equals") && <input aria-label="Filter value" placeholder="Enter a value" value={filter.value} onChange={(event) => { setFilter({ ...filter, value: event.target.value }); setOffset(0); }} />}</>}
+      </div>
+      {filter && <button type="button" className="based-filter-clear" onClick={() => { setFilter(null); setOffset(0); }}>Clear condition</button>}
+    </div>}
     {showSettings && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowSettings(false); }}>
       <section className="settings-modal" role="dialog" aria-modal="true" aria-label="Based settings">
         <div className="modal-heading"><div><h2>Based settings</h2><p>Back up and restore your databases separately from Noted.</p></div>
