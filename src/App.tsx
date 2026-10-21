@@ -44,6 +44,8 @@ import {
   applySlashCommand,
   filterSlashCommands,
   getSlashCommandMatch,
+  insertBlockFromPicker,
+  slashCommandOptions,
   type SlashCommandId,
   type SlashCommandMatch,
 } from "./lib/slashCommands";
@@ -75,9 +77,14 @@ import {
   getSession,
   isSupabaseConfigured,
   sendMagicLink,
+  setAccountPassword,
+  signInWithPassword,
   signOut,
   supabase,
+  verifyEmailLink,
 } from "./lib/supabase";
+import { pendingOfflineCount, queueOfflineNote, readOfflineWorkspace, saveOfflineWorkspace, syncOfflineNotes } from "./lib/offlineNotes";
+import { useMobileSidebarSwipe } from "./lib/mobileSidebarSwipe";
 import { registerWebMcpTools, type WebMcpApi } from "./lib/webmcp";
 import { clearWorkspaceCache, readWorkspaceCache, writeWorkspaceCache } from "./lib/workspaceCache";
 import BasedApp from "./BasedApp";
@@ -106,6 +113,17 @@ type RailActionDialog = { kind: "create-project" | "archive-project" | "archive-
 type InlineRename = { kind: "project" | "document"; id: string; value: string } | null;
 type SlashMenuState = SlashCommandMatch & { top: number; left: number; selectedIndex: number };
 type BlockDropTarget = { beforeIndex: number; top: number };
+
+const blockFormatOptions = [
+  { value: "paragraph", label: "Text" },
+  { value: "heading-1", label: "Heading 1" },
+  { value: "heading-2", label: "Heading 2" },
+  { value: "heading-3", label: "Heading 3" },
+  { value: "bulletList", label: "Bulleted list" },
+  { value: "orderedList", label: "Numbered list" },
+  { value: "taskList", label: "To-do list" },
+  { value: "blockquote", label: "Quote" },
+] as const;
 
 const defaultRailWidth = 223;
 const railWidthStorageKey = "noted-sidebar-width";
@@ -199,8 +217,12 @@ function RailRenameInput({ label, value, onChange, onCommit, onCancel }: {
 
 function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [pastedLink, setPastedLink] = useState("");
+  const [sent, setSent] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const emailInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!supabase) return;
@@ -210,13 +232,15 @@ function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => 
     return () => data.subscription.unsubscribe();
   }, [onAuthenticated]);
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
+  async function requestLink() {
+    if (!emailInput.current?.reportValidity()) return;
     setBusy(true);
     setMessage("");
     try {
       await sendMagicLink(email);
-      setMessage("Check your email for a secure sign-in link.");
+      setPastedLink("");
+      setSent(true);
+      setMessage("Copy the newest Sign in link from your email without opening it, then paste it below. The link works only once.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to send the sign-in link.");
     } finally {
@@ -224,36 +248,116 @@ function AuthGate({ onAuthenticated }: { onAuthenticated: (session: Session) => 
     }
   }
 
+  async function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try { onAuthenticated(await signInWithPassword(email, password)); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Unable to sign in with that password."); }
+    finally { setBusy(false); }
+  }
+
+  async function verifyLink(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try { onAuthenticated(await verifyEmailLink(pastedLink)); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Unable to verify the link."); }
+    finally { setBusy(false); }
+  }
+
   return (
     <main className="auth-page">
-      <form className="auth-card" onSubmit={submit}>
+      <form className="auth-card" onSubmit={submitPassword}>
         <div className="brand-mark">N</div>
         <p className="eyebrow"><ShieldCheck size={14} /> Private workspace</p>
         <h1>Welcome to Noted</h1>
-        <p>Sign in with your existing account to access your private workspace.</p>
+        <p>Sign in to your private workspace.</p>
         <label htmlFor="email">Email address</label>
         <input
           id="email"
+          ref={emailInput}
           type="email"
           autoComplete="email"
           value={email}
-          onChange={(event) => setEmail(event.target.value)}
+          onChange={(event) => {
+            setEmail(event.target.value);
+            setPastedLink("");
+            setSent(false);
+            setMessage("");
+          }}
           placeholder="you@example.com"
           required
         />
+        <label htmlFor="password">Password</label>
+        <input id="password" type="password" autoComplete="current-password" value={password}
+          onChange={(event) => setPassword(event.target.value)} required />
         <button className="primary-button" disabled={busy} type="submit">
-          {busy ? "Sending…" : "Email me a sign-in link"}
+          {busy ? "Working…" : "Sign in"}
+        </button>
+        <button className="auth-secondary-button" disabled={busy} type="button" onClick={() => void requestLink()}>
+          {sent ? "Send a new email link" : "Use an email link instead"}
         </button>
         {message && <p className="auth-message">{message}</p>}
       </form>
+      {sent && <>
+        <form className="auth-card auth-link-card" onSubmit={verifyLink}>
+          <label htmlFor="sign-in-link">Sign-in link from email</label>
+          <input id="sign-in-link" type="url" autoCapitalize="none" autoCorrect="off" value={pastedLink}
+            onChange={(event) => setPastedLink(event.target.value)} placeholder="Paste an unused full link here" required />
+          <button className="primary-button" disabled={busy} type="submit">{busy ? "Checking…" : "Sign in with link"}</button>
+        </form>
+      </>}
     </main>
   );
+}
+
+function PasswordSettings({ online }: { online: boolean }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (password !== confirmation) {
+      setMessage("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      await setAccountPassword(password);
+      setPassword("");
+      setConfirmation("");
+      setMessage("Password saved. You can now use it to sign in on your phone.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to save the password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <form className="setting-password" onSubmit={save}>
+    <div><h3>Create or change password</h3><p>Use it to sign in without requesting an email. Keep the email link as a backup.</p></div>
+    <label htmlFor="new-password">New password</label>
+    <input id="new-password" type="password" autoComplete="new-password" minLength={12}
+      value={password} onChange={(event) => setPassword(event.target.value)} disabled={!online || busy} required />
+    <label htmlFor="confirm-password">Confirm password</label>
+    <input id="confirm-password" type="password" autoComplete="new-password" minLength={12}
+      value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={!online || busy} required />
+    <button type="submit" disabled={!online || busy}>{busy ? "Saving…" : "Save password"}</button>
+    {message && <p className="setting-password-message" role="status">{message}</p>}
+  </form>;
 }
 
 export default function App() {
   const [tool, setTool] = useState<"noted" | "based">(() => localStorage.getItem("noted-active-tool") === "based" ? "based" : "noted");
   useEffect(() => { document.title = tool === "based" ? "Based — Databases" : "Noted — Writing with comments"; }, [tool]);
   const [session, setSession] = useState<Session | null | undefined>(isSupabaseConfigured ? undefined : null);
+  const [online, setOnline] = useState(() => navigator.onLine);
+  const [offlineOwner, setOfflineOwner] = useState<string | null>(null);
+  const [updateReady, setUpdateReady] = useState(false);
   const [documents, setDocuments] = useState<NoteDocument[]>([]);
   const [projects, setProjects] = useState<NoteProject[]>([]);
   const [comments, setComments] = useState<CommentThread[]>([]);
@@ -267,6 +371,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [searching, setSearching] = useState(false);
   const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  const mobileSidebarSwipe = useMobileSidebarSwipe(mobileRailOpen, setMobileRailOpen);
   const [railVisible, setRailVisible] = useState(() => localStorage.getItem(railVisibleStorageKey) !== "false");
   const [query, setQuery] = useState("");
   const [commentsOpen, setCommentsOpen] = useState(false);
@@ -285,9 +390,13 @@ export default function App() {
   const [railActionDialog, setRailActionDialog] = useState<RailActionDialog>(null);
   const [inlineRename, setInlineRename] = useState<InlineRename>(null);
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  const [mobileBlockMenuOpen, setMobileBlockMenuOpen] = useState(false);
   const [blockHandle, setBlockHandle] = useState<{ index: number; top: number } | null>(null);
   const [blockDropTarget, setBlockDropTarget] = useState<BlockDropTarget | null>(null);
   const [selectionMenuPosition, setSelectionMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [blockFormatMenuOpen, setBlockFormatMenuOpen] = useState(false);
+  const formatPickerInteracting = useRef(false);
+  const formatPickerSelection = useRef<{ from: number; to: number } | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [wideContent, setWideContent] = useState(() => localStorage.getItem(wideContentStorageKey) === "true");
   const [railWidth, setRailWidth] = useState(() => {
@@ -295,7 +404,7 @@ export default function App() {
     return Number.isFinite(stored) && stored >= 180 && stored <= 420 ? stored : defaultRailWidth;
   });
 
-  const userId = session?.user.id ?? null;
+  const userId = session?.user.id ?? (!online ? offlineOwner : null);
   const documentsRef = useRef(documents);
   const projectsRef = useRef(projects);
   const commentsRef = useRef(comments);
@@ -308,12 +417,14 @@ export default function App() {
   const refreshing = useRef<string | null>(null);
   const pendingUpdates = useRef(new Map<string, DocumentUpdates>());
   const saveInFlight = useRef<Promise<void> | null>(null);
+  const offlineWrite = useRef<Promise<unknown>>(Promise.resolve());
   const editorDocumentId = useRef<string | null>(null);
   const commentCardRefs = useRef(new Map<string, HTMLElement>());
   const documentPageRef = useRef<HTMLElement | null>(null);
   const draggedBlockRef = useRef<number | null>(null);
   const blockHandleHideTimer = useRef<number | null>(null);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
+  const mobileBlockMenuRef = useRef<HTMLDivElement | null>(null);
   const railContextMenuRef = useRef<HTMLDivElement | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
   const slashCommandChangeRef = useRef<(editor: Editor, allowOpen: boolean) => void>(() => undefined);
@@ -331,6 +442,25 @@ export default function App() {
   }, [activeId, userId]);
   useEffect(() => { displayNameRef.current = displayName; }, [displayName]);
   useEffect(() => { userIdRef.current = userId; }, [userId]);
+  useEffect(() => {
+    pendingUpdates.current.clear();
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+  }, [userId]);
+  useEffect(() => {
+    const connected = () => setOnline(true);
+    const disconnected = () => setOnline(false);
+    window.addEventListener("online", connected);
+    window.addEventListener("offline", disconnected);
+    return () => { window.removeEventListener("online", connected); window.removeEventListener("offline", disconnected); };
+  }, []);
+  useEffect(() => {
+    const ready = () => setUpdateReady(true);
+    window.addEventListener("noted-update-ready", ready);
+    return () => window.removeEventListener("noted-update-ready", ready);
+  }, []);
+  useEffect(() => {
+    if (session?.user.id) localStorage.setItem("noted-last-signed-in-owner", session.user.id);
+  }, [session]);
   useEffect(() => {
     if (!mobileRailOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -354,6 +484,22 @@ export default function App() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [toolbarMenuOpen]);
+  useEffect(() => {
+    if (!mobileBlockMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!mobileBlockMenuRef.current?.contains(event.target as Node)) setMobileBlockMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileBlockMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileBlockMenuOpen]);
+  useEffect(() => { setMobileBlockMenuOpen(false); }, [activeId]);
   useEffect(() => {
     if (!railContextMenu) return;
     railContextMenuRef.current?.querySelector("button")?.focus();
@@ -385,12 +531,36 @@ export default function App() {
     if (!selectionMenuPosition) return;
     const hideOnOutsideClick = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (documentPageRef.current?.querySelector(".document-body")?.contains(target) ||
-          documentPageRef.current?.querySelector(".selection-toolbar")?.contains(target)) return;
+      if (documentPageRef.current?.querySelector(".document-body")?.contains(target)) {
+        if (blockFormatMenuOpen) {
+          setBlockFormatMenuOpen(false);
+          formatPickerInteracting.current = false;
+          formatPickerSelection.current = null;
+        }
+        return;
+      }
+      if (documentPageRef.current?.querySelector(".selection-toolbar")?.contains(target)) {
+        if (blockFormatMenuOpen && !documentPageRef.current?.querySelector(".selection-block-select")?.contains(target)) {
+          setBlockFormatMenuOpen(false);
+          formatPickerInteracting.current = false;
+          formatPickerSelection.current = null;
+        }
+        return;
+      }
       setSelectionMenuPosition(null);
+      setBlockFormatMenuOpen(false);
+      formatPickerInteracting.current = false;
+      formatPickerSelection.current = null;
     };
     document.addEventListener("mousedown", hideOnOutsideClick);
     return () => document.removeEventListener("mousedown", hideOnOutsideClick);
+  }, [selectionMenuPosition, blockFormatMenuOpen]);
+
+  useEffect(() => {
+    if (selectionMenuPosition) return;
+    setBlockFormatMenuOpen(false);
+    formatPickerInteracting.current = false;
+    formatPickerSelection.current = null;
   }, [selectionMenuPosition]);
 
   const editorChangeRef = useRef<(editor: Editor) => void>(() => undefined);
@@ -424,6 +594,27 @@ export default function App() {
       slashCommandChangeRef.current(currentEditor, false);
     },
   });
+
+  useEffect(() => {
+    if (!editor) return;
+    let frame = 0;
+    const showSelectedTextToolbar = () => {
+      if (formatPickerInteracting.current || !editor.view.hasFocus()) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const selected = window.getSelection();
+        if (!selected || selected.isCollapsed ||
+            !editor.view.dom.contains(selected.anchorNode) ||
+            !editor.view.dom.contains(selected.focusNode)) return;
+        selectionChangeRef.current(editor);
+      });
+    };
+    document.addEventListener("selectionchange", showSelectedTextToolbar);
+    return () => {
+      document.removeEventListener("selectionchange", showSelectedTextToolbar);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [editor]);
 
   useEffect(() => {
     if (blockHandleHideTimer.current !== null) window.clearTimeout(blockHandleHideTimer.current);
@@ -586,11 +777,16 @@ export default function App() {
     const persist = () => writeWorkspaceCache(owner, {
       documents, projects, comments, replies, notifications, displayName,
     }, activeId);
-    const timer = window.setTimeout(persist, 250);
-    window.addEventListener("pagehide", persist);
+    const persistAll = () => {
+      persist();
+      void saveOfflineWorkspace(owner, { documents, projects, comments, replies, notifications, displayName }, activeId)
+        .catch(() => { setSaveState("error"); setError("Unable to save notes on this device."); });
+    };
+    const timer = window.setTimeout(persistAll, 250);
+    window.addEventListener("pagehide", persistAll);
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener("pagehide", persist);
+      window.removeEventListener("pagehide", persistAll);
     };
   }, [userId, loadedOwner, loading, documents, projects, comments, replies, notifications, displayName, activeId]);
 
@@ -602,11 +798,21 @@ export default function App() {
     const next = current.map((document) => document.id === documentId ? updated : document);
     documentsRef.current = next;
     saveDocumentDraft(updated);
+    if (userIdRef.current) {
+      const owner = userIdRef.current;
+      offlineWrite.current = offlineWrite.current.catch(() => undefined)
+        .then(() => queueOfflineNote(owner, updated));
+      void offlineWrite.current.catch(() => {
+        setSaveState("error");
+        setError("Unable to save this note on this device.");
+      });
+    }
     setDocuments(next);
   }, []);
 
   const refreshWorkspace = useCallback(async (quiet = false) => {
     if (isSupabaseConfigured && !userIdRef.current) return;
+    if (isSupabaseConfigured && !navigator.onLine) return;
     const owner = userIdRef.current ?? "local-user";
     if (refreshing.current === owner) return;
     refreshing.current = owner;
@@ -614,7 +820,8 @@ export default function App() {
     setError("");
     try {
       let data = await loadWorkspace(userIdRef.current);
-      if (data.documents.length === 0) {
+      const priorOffline = await readOfflineWorkspace(owner);
+      if (data.documents.length === 0 && !Object.keys(priorOffline?.pending ?? {}).length) {
         const content = inputToContent(welcomeMarkdown, "markdown");
         const welcome = await createDocument(
           userIdRef.current,
@@ -625,6 +832,13 @@ export default function App() {
         data = { ...data, documents: [welcome] };
       }
       if ((userIdRef.current ?? "local-user") !== owner) return;
+      const pending = priorOffline?.pending ?? {};
+      const merged = data.documents.map((document) => pending[document.id]?.document ?? document);
+      for (const entry of Object.values(pending)) {
+        if (!merged.some((document) => document.id === entry.document.id)) merged.unshift(entry.document);
+      }
+      data = { ...data, documents: merged };
+      await saveOfflineWorkspace(owner, data, activeIdRef.current);
       setDocuments(data.documents);
       setProjects(data.projects);
       setComments(data.comments);
@@ -658,26 +872,32 @@ export default function App() {
       setSession(null);
       return;
     }
-    void getSession().then(setSession).catch((caught) => {
-      setError(caught instanceof Error ? caught.message : "Unable to restore your session.");
+    void getSession().then((next) => {
+      if (!next && !navigator.onLine) setOfflineOwner(localStorage.getItem("noted-last-signed-in-owner"));
+      setSession(next);
+    }).catch((caught) => {
+      if (!navigator.onLine) setOfflineOwner(localStorage.getItem("noted-last-signed-in-owner"));
+      else setError(caught instanceof Error ? caught.message : "Unable to restore your session.");
       setSession(null);
       setLoading(false);
     });
     if (!supabase) return;
     const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      if (event === "SIGNED_OUT" && userIdRef.current) clearWorkspaceCache(userIdRef.current);
+      if (event === "SIGNED_OUT" && !navigator.onLine)
+        setOfflineOwner(localStorage.getItem("noted-last-signed-in-owner"));
       setSession(nextSession);
     });
     return () => data.subscription.unsubscribe();
   }, [refreshWorkspace]);
 
   useEffect(() => {
-    if (isSupabaseConfigured && !session) {
+    if (isSupabaseConfigured && !session && !offlineOwner) {
       if (session !== undefined) setLoading(false);
       return;
     }
     const owner = userId ?? "local-user";
     if (loadedOwner !== owner) {
+      let cancelled = false;
       const cached = readWorkspaceCache(owner);
       if (cached) {
         const drafts = new Map(getDocumentDrafts(userId).map((draft) => [draft.id, draft]));
@@ -697,9 +917,36 @@ export default function App() {
         setLoadedOwner(owner);
         setLoading(false);
       }
-      void refreshWorkspace(Boolean(cached));
+      void (async () => {
+        let hasCache = Boolean(cached);
+        try {
+          const offline = await readOfflineWorkspace(owner);
+          if (cancelled || (userIdRef.current ?? "local-user") !== owner) return;
+          if (offline) {
+            const drafts = new Map(getDocumentDrafts(userId).map((draft) => [draft.id, draft]));
+            const cachedDocuments = offline.data.documents.map((document) =>
+              drafts.has(document.id) ? { ...document, ...drafts.get(document.id), revision: document.revision } : document);
+            setDocuments(cachedDocuments);
+            setProjects(offline.data.projects);
+            setComments(offline.data.comments);
+            setReplies(offline.data.replies);
+            setNotifications(offline.data.notifications);
+            setDisplayName(offline.data.displayName);
+            setActiveId(offline.activeId ?? cachedDocuments[0]?.id ?? null);
+            setLoadedOwner(owner);
+            setLoading(false);
+            hasCache = true;
+          }
+        } catch (caught) {
+          if (!cancelled) setError(caught instanceof Error ? caught.message : "Unable to read notes on this device.");
+        }
+        if (cancelled || (userIdRef.current ?? "local-user") !== owner) return;
+        if (navigator.onLine) void refreshWorkspace(hasCache);
+        else if (!hasCache) setLoading(false);
+      })();
+      return () => { cancelled = true; };
     }
-  }, [session, refreshWorkspace]);
+  }, [session, offlineOwner, refreshWorkspace]);
 
   useEffect(() => {
     if (!supabase || !userId) return;
@@ -794,50 +1041,33 @@ export default function App() {
 
   const flushPendingSave = useCallback(async () => {
     if (saveInFlight.current) await saveInFlight.current;
-    const entries = [...pendingUpdates.current.entries()];
-    if (!entries.length) return;
+    const owner = userIdRef.current;
+    if (!owner) return;
+    try { await offlineWrite.current; }
+    catch { setSaveState("error"); return; }
+    if (!navigator.onLine) { setSaveState("pending"); return; }
     const save = (async () => {
-      entries.forEach(([documentId]) => pendingUpdates.current.delete(documentId));
       setSaveState("saving");
-      const results = await Promise.allSettled(entries.map(([documentId, updates]) =>
-        updateDocument(userIdRef.current, documentId, updates)));
-      const savedDocuments = new Map<string, NoteDocument>();
-      const failures: string[] = [];
-
-      results.forEach((result, index) => {
-        const [documentId, submitted] = entries[index];
-        if (result.status === "fulfilled") {
-          savedDocuments.set(documentId, result.value);
-          return;
+      try {
+        const result = await syncOfflineNotes(owner);
+        for (const id of result.conflictSourceIds) {
+          clearDocumentDraft(id);
+          pendingUpdates.current.delete(id);
         }
-        const newer = pendingUpdates.current.get(documentId);
-        pendingUpdates.current.set(documentId, { ...submitted, ...newer });
-        failures.push(result.reason instanceof Error ? result.reason.message : "Unable to save this note.");
-      });
-
-      setDocuments((current) => {
-        const next = current.map((document) => {
-          const saved = savedDocuments.get(document.id);
-          if (!saved || pendingUpdates.current.has(document.id)) return document;
-          clearDocumentDraft(document.id);
-          return saved;
-        });
-        documentsRef.current = next;
-        return next;
-      });
-
-      if (failures.length) {
+        if (!result.pending) {
+          for (const id of pendingUpdates.current.keys()) clearDocumentDraft(id);
+          pendingUpdates.current.clear();
+        }
+        setSaveState(result.pending ? "pending" : "saved");
+        if (result.conflicts.length) setError("A note changed elsewhere. Your phone version was saved as an offline conflict copy.");
+        void refreshWorkspace(true);
+        if (result.pending && navigator.onLine) {
+          if (saveTimer.current) window.clearTimeout(saveTimer.current);
+          saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+        }
+      } catch (caught) {
         setSaveState("error");
-        setError(failures[0]);
-      } else if (pendingUpdates.current.size) {
-        setSaveState("pending");
-      } else {
-        setSaveState("saved");
-      }
-
-      if (pendingUpdates.current.size) {
-        if (saveTimer.current) window.clearTimeout(saveTimer.current);
-        saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+        setError(caught instanceof Error ? caught.message : "Cloud sync paused. Your changes remain on this device.");
       }
     })();
     saveInFlight.current = save;
@@ -846,7 +1076,7 @@ export default function App() {
     } finally {
       if (saveInFlight.current === save) saveInFlight.current = null;
     }
-  }, []);
+  }, [refreshWorkspace]);
 
   const scheduleSave = useCallback((
     documentId: string,
@@ -858,7 +1088,7 @@ export default function App() {
     });
     setSaveState("pending");
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+    if (navigator.onLine) saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
   }, [flushPendingSave]);
 
   useEffect(() => {
@@ -875,9 +1105,21 @@ export default function App() {
     if (drafts.length) {
       setSaveState("pending");
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
+      const owner = userIdRef.current;
+      if (owner) for (const draft of drafts) {
+        offlineWrite.current = offlineWrite.current.catch(() => undefined)
+          .then(() => queueOfflineNote(owner, draft));
+      }
+      if (navigator.onLine) saveTimer.current = window.setTimeout(() => void flushPendingSave(), 5000);
     }
   }, [loading, userId, flushPendingSave]);
+
+  useEffect(() => {
+    if (!online || !session?.user.id || loading) return;
+    void pendingOfflineCount(session.user.id).then((count) => {
+      if (count) void flushPendingSave();
+    });
+  }, [online, session, loading, flushPendingSave]);
 
   editorChangeRef.current = (currentEditor) => {
     const documentId = activeIdRef.current;
@@ -889,6 +1131,7 @@ export default function App() {
   };
 
   selectionChangeRef.current = (currentEditor) => {
+    if (formatPickerInteracting.current) return;
     const { from, to } = currentEditor.state.selection;
     const quote = currentEditor.state.doc.textBetween(from, to, " ");
     const hasText = from !== to && Boolean(quote.trim());
@@ -921,18 +1164,27 @@ export default function App() {
   async function handleNewDocument(projectId: string | null = null) {
     try {
       const sortOrder = nextTopSortOrder(documentsRef.current, projectId);
-      const note = await createDocument(userId, "Untitled note", blankContent, "", projectId, sortOrder);
+      const timestamp = new Date().toISOString();
+      let note: NoteDocument = {
+        id: crypto.randomUUID(), owner_id: userId ?? "local-user", title: "Untitled note",
+        content_json: blankContent, plain_text: "", revision: 1, created_at: timestamp,
+        updated_at: timestamp, deleted_at: null, archived_at: null, project_id: projectId, sort_order: sortOrder,
+      };
+      if (isSupabaseConfigured && userId) await queueOfflineNote(userId, note, true);
+      else note = await createDocument(userId, note.title, blankContent, "", projectId, sortOrder);
       const next = [note, ...documentsRef.current];
       documentsRef.current = next;
       setDocuments(next);
       setActiveId(note.id);
       setMobileRailOpen(false);
+      if (online && isSupabaseConfigured) void flushPendingSave();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to create a note.");
     }
   }
 
   async function handleNewProject(name: string) {
+    if (!online) { setError("Projects need a connection."); return; }
     name = name.trim();
     if (!name) return;
     try {
@@ -948,6 +1200,7 @@ export default function App() {
   }
 
   async function handleRenameProject(project: NoteProject, name: string) {
+    if (!online) { setError("Projects need a connection."); return; }
     name = name.trim();
     if (!name || name === project.name) return;
     try {
@@ -983,6 +1236,7 @@ export default function App() {
   }
 
   async function handleProjectCollapsed(project: NoteProject) {
+    if (!online) return;
     const collapsed = !project.collapsed;
     setProjects((current) => current.map((item) => item.id === project.id ? { ...item, collapsed } : item));
     try {
@@ -995,6 +1249,7 @@ export default function App() {
   }
 
   async function arrangeProject(projectId: string, targetProjectId: string | null = null, placeAfter = false) {
+    if (!online) return;
     const original = projectsRef.current;
     if (projectId === targetProjectId) return;
     const moving = original.find((project) => project.id === projectId);
@@ -1020,6 +1275,7 @@ export default function App() {
   }
 
   async function arrangeDocument(documentId: string, projectId: string | null, beforeDocumentId: string | null = null) {
+    if (!online) return;
     const original = documentsRef.current;
     const moving = original.find((document) => document.id === documentId);
     if (!moving || beforeDocumentId === documentId) return;
@@ -1136,6 +1392,7 @@ export default function App() {
   }
 
   async function handleArchiveDocument(document: NoteDocument) {
+    if (!online) { setError("Archiving needs a connection."); return; }
     try {
       await flushPendingSave();
       if (pendingUpdates.current.has(document.id)) {
@@ -1161,6 +1418,7 @@ export default function App() {
   }
 
   async function handleRestoreDocument(document: NoteDocument) {
+    if (!online) { setError("Restoring needs a connection."); return; }
     try {
       const updated = await updateDocument(userId, document.id, { archived_at: null });
       setDocuments((current) => current.map((item) => item.id === document.id ? updated : item));
@@ -1174,6 +1432,7 @@ export default function App() {
   }
 
   async function handleArchiveProject(project: NoteProject) {
+    if (!online) { setError("Projects need a connection."); return; }
     try {
       const updated = await updateProject(userId, project.id, { archived_at: new Date().toISOString() });
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
@@ -1186,6 +1445,7 @@ export default function App() {
   }
 
   async function handleRestoreProject(project: NoteProject) {
+    if (!online) { setError("Projects need a connection."); return; }
     try {
       const updated = await updateProject(userId, project.id, { archived_at: null });
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
@@ -1201,6 +1461,7 @@ export default function App() {
   }
 
   async function submitComment() {
+    if (!online) { setError("Comments need a connection."); return; }
     if (!activeDocument || !selection || !commentDraft.trim() || !editor) return;
     setCommenting(true);
     try {
@@ -1229,6 +1490,7 @@ export default function App() {
   }
 
   async function handleReply(commentId: string) {
+    if (!online) { setError("Comments need a connection."); return; }
     const body = replyDrafts[commentId]?.trim();
     if (!body) return;
     try {
@@ -1241,6 +1503,7 @@ export default function App() {
   }
 
   async function handleCommentStatus(commentId: string, status: CommentStatus) {
+    if (!online) { setError("Comments need a connection."); return; }
     try {
       const updated = await setCommentStatus(userId, commentId, status);
       setComments((current) => current.map((item) => item.id === commentId ? updated : item));
@@ -1250,6 +1513,7 @@ export default function App() {
   }
 
   async function handleDisplayName(value: string) {
+    if (!online) { setError("Settings changes need a connection."); return; }
     const clean = value.trim() || "You";
     setDisplayName(clean);
     try {
@@ -1607,16 +1871,18 @@ export default function App() {
   if (isSupabaseConfigured && session === undefined) {
     return <main className="loading-page">Opening your workspace…</main>;
   }
-  if (isSupabaseConfigured && !session) {
+  if (isSupabaseConfigured && !session && !offlineOwner) {
     return <AuthGate onAuthenticated={setSession} />;
   }
-  if (tool === "based") return <BasedApp userId={userId} railWidth={railWidth} onSwitch={() => {
+  if (tool === "based") return <BasedApp userId={userId} railWidth={railWidth} online={online} onSwitch={() => {
     localStorage.setItem("noted-active-tool", "noted");
     setRailVisible(localStorage.getItem(railVisibleStorageKey) !== "false");
     setTool("noted");
   }} />;
   if (loadedOwner !== (userId ?? "local-user")) {
-    return <main className="loading-page">{error || "Opening your workspace…"}</main>;
+    return <main className="loading-page">{error || (!online && !loading
+      ? "Open and sign in while online once to make notes available offline."
+      : "Opening your workspace…")}</main>;
   }
 
   function selectDocument(documentId: string) {
@@ -1658,8 +1924,24 @@ export default function App() {
     }
   }
 
+  async function applyReadyUpdate() {
+    await offlineWrite.current;
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration?.waiting) return;
+    navigator.serviceWorker.addEventListener("controllerchange", () => window.location.reload(), { once: true });
+    registration.waiting.postMessage("SKIP_WAITING");
+  }
+
+  async function handleSignOut() {
+    await offlineWrite.current;
+    await signOut();
+    if (userId) clearWorkspaceCache(userId);
+    localStorage.removeItem("noted-last-signed-in-owner");
+    setOfflineOwner(null);
+  }
+
   return (
-    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""} ${mobileRailOpen ? "mobile-rail-open" : ""} ${railVisible ? "" : "rail-hidden"}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+    <div className={`app-shell ${commentsOpen ? "comments-visible" : ""} ${mobileRailOpen ? "mobile-rail-open" : ""} ${railVisible ? "" : "rail-hidden"}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties} {...mobileSidebarSwipe}>
       {railContextMenu && (
         <div
           ref={railContextMenuRef}
@@ -1675,7 +1957,7 @@ export default function App() {
             buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
           }}
         >
-          <button type="button" role="menuitem" onClick={() => {
+          <button type="button" role="menuitem" disabled={!online && railContextMenu.kind === "project"} onClick={() => {
             const item = railContextMenu.kind === "project"
               ? projectsRef.current.find((project) => project.id === railContextMenu.id)
               : documentsRef.current.find((document) => document.id === railContextMenu.id);
@@ -1683,7 +1965,7 @@ export default function App() {
             if (!item) return;
             setInlineRename({ kind: railContextMenu.kind, id: item.id, value: railContextMenu.kind === "project" ? (item as NoteProject).name : (item as NoteDocument).title });
           }}>Rename</button>
-          <button type="button" role="menuitem" onClick={() => {
+          <button type="button" role="menuitem" disabled={!online} onClick={() => {
             const item = railContextMenu.kind === "project"
               ? projectsRef.current.find((project) => project.id === railContextMenu.id)
               : documentsRef.current.find((document) => document.id === railContextMenu.id);
@@ -1731,7 +2013,7 @@ export default function App() {
       <button type="button" className="mobile-rail-backdrop" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)} />
       <aside className="document-rail" aria-label="Documents" id="document-rail">
         <div className="rail-actions">
-          <button type="button" className="rail-brand based-brand" title="Switch to Based" onClick={() => {
+          <button type="button" className="rail-brand based-brand" title={online ? "Switch to Based" : "Based needs a connection"} disabled={!online} onClick={() => {
             void flushPendingSave(); localStorage.setItem("noted-active-tool", "based"); setTool("based");
           }}>Noted</button>
           <div className="rail-tools">
@@ -1757,7 +2039,7 @@ export default function App() {
         <div className="document-list">
           <div className="rail-section-heading">
             <p className="rail-label">Projects</p>
-            <button type="button" aria-label="Create project" title="Create project" onClick={() => setRailActionDialog({ kind: "create-project", value: "" })}>
+            <button type="button" aria-label="Create project" title={online ? "Create project" : "Projects need a connection"} disabled={!online} onClick={() => setRailActionDialog({ kind: "create-project", value: "" })}>
               <FolderPlus size={16} />
             </button>
           </div>
@@ -1907,7 +2189,7 @@ export default function App() {
               {archivedProjects.map((project) => (
                 <div className="archive-row" key={project.id}>
                   <span>{project.name}</span>
-                  <button type="button" title="Restore project" aria-label={`Restore ${project.name}`} onClick={() => void handleRestoreProject(project)}>
+                  <button type="button" title={online ? "Restore project" : "Projects need a connection"} disabled={!online} aria-label={`Restore ${project.name}`} onClick={() => void handleRestoreProject(project)}>
                     <ArchiveRestore size={14} />
                   </button>
                 </div>
@@ -1915,7 +2197,7 @@ export default function App() {
               {archivedDocuments.map((document) => (
                 <div className="archive-row" key={document.id}>
                   <span>{document.title}</span>
-                  <button type="button" title="Restore note" aria-label={`Restore ${document.title}`} onClick={() => void handleRestoreDocument(document)}>
+                  <button type="button" title={online ? "Restore note" : "Restoring needs a connection"} disabled={!online} aria-label={`Restore ${document.title}`} onClick={() => void handleRestoreDocument(document)}>
                     <ArchiveRestore size={14} />
                   </button>
                 </div>
@@ -1936,6 +2218,10 @@ export default function App() {
       </aside>
 
       <main className="workspace">
+        {(!online || updateReady) && <div className="workspace-status" role="status">
+          {!online && <span>Offline · Notes save on this device. Comments, projects, and Based need a connection.</span>}
+          {updateReady && <button type="button" onClick={() => void applyReadyUpdate()}>Update ready · Reload</button>}
+        </div>}
         <header className="workspace-header">
           <div className="workspace-location">
             {!railVisible && <button type="button" className="sidebar-show" aria-label="Show sidebar" title="Show sidebar" onClick={() => { setRailVisible(true); localStorage.setItem(railVisibleStorageKey, "true"); }}><PanelLeftOpen size={18} /></button>}
@@ -1954,19 +2240,20 @@ export default function App() {
           <div className="header-actions">
             <button type="button" className={`save-indicator ${saveState}`} onClick={() => setSettingsOpen(true)}>
               <span className="connection-dot cloud" />
-              {saveState === "pending"
-                ? "Saved locally"
+              {saveState === "pending" || !online
+                ? "Saved on this device"
                 : saveState === "saving"
                   ? "Syncing…"
                   : saveState === "error"
-                    ? "Cloud sync paused"
-                    : isSupabaseConfigured ? "Saved to Supabase" : "Saved on this device"}
+                    ? "Needs attention"
+                    : isSupabaseConfigured ? "Synced" : "Saved on this device"}
             </button>
             <div className="notification-menu">
               <button
                 type="button"
                 className={`header-button icon-only notification-button ${notificationsOpen ? "is-active" : ""}`}
                 aria-label="Mentions"
+                disabled={!online}
                 aria-expanded={notificationsOpen}
                 title="Mentions"
                 onClick={() => setNotificationsOpen((value) => !value)}
@@ -2014,7 +2301,7 @@ export default function App() {
               )}
             </div>
             {selection && (
-              <button type="button" className="comment-selection-button" onClick={() => { setFocusedCommentId(null); setCommentsOpen(true); setCommenting(true); }}>
+              <button type="button" className="comment-selection-button" disabled={!online} onClick={() => { setFocusedCommentId(null); setCommentsOpen(true); setCommenting(true); }}>
                 <MessageCirclePlus size={17} /> Comment
               </button>
             )}
@@ -2023,7 +2310,8 @@ export default function App() {
               className={`header-button icon-only ${commentsOpen ? "is-active" : ""}`}
               aria-label="Comments"
               aria-expanded={commentsOpen}
-              title="Comments"
+              title={online ? "Comments" : "Comments need a connection"}
+              disabled={!online}
               onClick={() => { setFocusedCommentId(null); setCommentsOpen((value) => !value); }}
             >
               <MessageCircle size={18} />
@@ -2081,25 +2369,78 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              <div className="mobile-block-picker" ref={mobileBlockMenuRef}>
+                <button
+                  type="button"
+                  className="mobile-add-block"
+                  aria-label="Add block"
+                  aria-expanded={mobileBlockMenuOpen}
+                  aria-controls="mobile-block-options"
+                  onClick={() => setMobileBlockMenuOpen((open) => !open)}
+                ><Plus size={18} /><span>Add block</span></button>
+                {mobileBlockMenuOpen && (
+                  <div id="mobile-block-options" className="mobile-block-options" role="group" aria-label="Choose block type">
+                    {slashCommandOptions.map((option) => (
+                      <button key={option.id} type="button" onClick={() => {
+                        if (editor) insertBlockFromPicker(editor, option.id);
+                        setMobileBlockMenuOpen(false);
+                      }}>
+                        <span className={`slash-command-icon ${option.id}`} aria-hidden="true">
+                          {option.id === "checklist" ? <CheckSquare size={17} />
+                            : option.id === "database" ? <Database size={17} />
+                              : option.id === "quote" ? <Quote size={17} />
+                                : option.id === "paragraph" ? "T"
+                                  : option.id.replace("heading-", "H")}
+                        </span>
+                        <span className="slash-command-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {selection && selectionMenuPosition && (
                 <div className="selection-toolbar" role="toolbar" aria-label="Selected text formatting" style={selectionMenuPosition}>
-                  <label className="selection-block-select">
-                    <select
-                      aria-label="Convert block"
-                      value={editor?.isActive("taskList") ? "taskList" : editor?.isActive("bulletList") ? "bulletList" : editor?.isActive("orderedList") ? "orderedList" : editor?.isActive("blockquote") ? "blockquote" : editor?.isActive("heading", { level: 1 }) ? "heading-1" : editor?.isActive("heading", { level: 2 }) ? "heading-2" : editor?.isActive("heading", { level: 3 }) ? "heading-3" : "paragraph"}
-                      onChange={(event) => { if (editor) changeSelectedBlock(editor, event.target.value); }}
-                    >
-                      <option value="paragraph">Text</option>
-                      <option value="heading-1">Heading 1</option>
-                      <option value="heading-2">Heading 2</option>
-                      <option value="heading-3">Heading 3</option>
-                      <option value="bulletList">Bulleted list</option>
-                      <option value="orderedList">Numbered list</option>
-                      <option value="taskList">To-do list</option>
-                      <option value="blockquote">Quote</option>
-                    </select>
-                    <ChevronDown size={14} />
-                  </label>
+                  <div className="selection-block-select" onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    setBlockFormatMenuOpen(false);
+                    formatPickerInteracting.current = false;
+                    formatPickerSelection.current = null;
+                  }} onBlur={(event) => {
+                    if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+                    setBlockFormatMenuOpen(false);
+                    formatPickerInteracting.current = false;
+                    formatPickerSelection.current = null;
+                  }}>
+                    <button type="button" aria-label="Convert block" aria-haspopup="menu" aria-expanded={blockFormatMenuOpen}
+                      onPointerDown={() => { formatPickerInteracting.current = true; formatPickerSelection.current = selection; }}
+                      onFocus={() => { formatPickerInteracting.current = true; formatPickerSelection.current ??= selection; }}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        if (blockFormatMenuOpen) {
+                          setBlockFormatMenuOpen(false);
+                          formatPickerInteracting.current = false;
+                          formatPickerSelection.current = null;
+                        } else {
+                          formatPickerInteracting.current = true;
+                          formatPickerSelection.current ??= selection;
+                          setBlockFormatMenuOpen(true);
+                        }
+                      }}>
+                      <span>{editor?.isActive("taskList") ? "To-do list" : editor?.isActive("bulletList") ? "Bulleted list" : editor?.isActive("orderedList") ? "Numbered list" : editor?.isActive("blockquote") ? "Quote" : editor?.isActive("heading", { level: 1 }) ? "Heading 1" : editor?.isActive("heading", { level: 2 }) ? "Heading 2" : editor?.isActive("heading", { level: 3 }) ? "Heading 3" : "Text"}</span>
+                      <ChevronDown size={14} />
+                    </button>
+                    {blockFormatMenuOpen && <div className="selection-block-menu" role="menu" aria-label="Block type">
+                      {blockFormatOptions.map((option) => <button key={option.value} type="button" role="menuitem"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          if (editor) changeSelectedBlock(editor, option.value, formatPickerSelection.current ?? selection);
+                          formatPickerInteracting.current = false;
+                          formatPickerSelection.current = null;
+                          setBlockFormatMenuOpen(false);
+                          setSelectionMenuPosition(null);
+                        }}>{option.label}</button>)}
+                    </div>}
+                  </div>
                   <span className="selection-toolbar-divider" />
                   <IconButton label="Bold" active={editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={17} /></IconButton>
                   <IconButton label="Italic" active={editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={17} /></IconButton>
@@ -2154,7 +2495,7 @@ export default function App() {
                   >
                     <div className="slash-command-search" aria-hidden="true">
                       <Search size={14} />
-                      <span><strong>/</strong>{slashMenu.query || "Type to filter…"}</span>
+                      <span><strong>{slashMenu.trigger}</strong>{slashMenu.query || "Type to filter…"}</span>
                     </div>
                     <div className="slash-command-label">Insert block</div>
                     {filtered.map((option, index) => (
@@ -2214,10 +2555,10 @@ export default function App() {
           {commenting && selection && (
             <div className="comment-composer">
               <blockquote>“{selection.quote}”</blockquote>
-              <textarea autoFocus value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Leave a comment…" />
+              <textarea autoFocus disabled={!online} value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Leave a comment…" />
               <div className="composer-actions">
                 <button onClick={() => { setCommenting(false); setCommentDraft(""); }}>Cancel</button>
-                <button className="primary-button compact" disabled={!commentDraft.trim()} onClick={() => void submitComment()}>Comment</button>
+                <button className="primary-button compact" disabled={!online || !commentDraft.trim()} onClick={() => void submitComment()}>Comment</button>
               </div>
             </div>
           )}
@@ -2245,13 +2586,14 @@ export default function App() {
                 ))}
                 <textarea
                   className="reply-input"
+                  disabled={!online}
                   value={replyDrafts[comment.id] ?? ""}
                   onChange={(event) => setReplyDrafts((current) => ({ ...current, [comment.id]: event.target.value }))}
                   placeholder="Reply…"
                 />
                 <div className="comment-actions">
-                  <button disabled={!replyDrafts[comment.id]?.trim()} onClick={() => void handleReply(comment.id)}>Reply</button>
-                  <button onClick={() => void handleCommentStatus(comment.id, comment.status === "open" ? "resolved" : "open")}>
+                  <button disabled={!online || !replyDrafts[comment.id]?.trim()} onClick={() => void handleReply(comment.id)}>Reply</button>
+                  <button disabled={!online} onClick={() => void handleCommentStatus(comment.id, comment.status === "open" ? "resolved" : "open")}>
                     {comment.status === "open" ? <><Check size={14} /> Resolve</> : "Reopen"}
                   </button>
                 </div>
@@ -2288,13 +2630,13 @@ export default function App() {
             </div>
             <div className="setting-row">
               <div><h3>Display name</h3><p>Shown on comments you write in this browser.</p></div>
-              <input defaultValue={displayName} onBlur={(event) => void handleDisplayName(event.target.value)} aria-label="Display name" />
+              <input defaultValue={displayName} disabled={!online} title={online ? undefined : "Settings changes need a connection"} onBlur={(event) => void handleDisplayName(event.target.value)} aria-label="Display name" />
             </div>
             <div className="setting-row">
               <div><h3>Backup and restore</h3><p>Move all notes and comments with one versioned JSON file.</p></div>
               <div className="setting-actions">
-                <button onClick={() => void handleExport()}><Download size={16} /> Export</button>
-                <label className="button-label"><Upload size={16} /> Import<input type="file" accept="application/json" onChange={(event) => {
+                <button disabled={!online} title={online ? undefined : "Backup needs a connection"} onClick={() => void handleExport()}><Download size={16} /> Export</button>
+                <label className={`button-label ${online ? "" : "is-disabled"}`} title={online ? undefined : "Restore needs a connection"}><Upload size={16} /> Import<input type="file" disabled={!online} accept="application/json" onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) void handleImport(file);
                 }} /></label>
@@ -2307,10 +2649,13 @@ export default function App() {
               </div>
             </div>
             {isSupabaseConfigured && (
-              <div className="setting-row final-row">
-                <div><h3>Signed in</h3><p>{session?.user.email}</p></div>
-                <button onClick={() => void signOut()}>Sign out</button>
-              </div>
+              <>
+                <PasswordSettings online={online} />
+                <div className="setting-row final-row">
+                  <div><h3>Signed in</h3><p>{session?.user.email}</p></div>
+                  <button onClick={() => void handleSignOut()}>Sign out</button>
+                </div>
+              </>
             )}
             {!isSupabaseConfigured && (
               <div className="setting-row final-row">

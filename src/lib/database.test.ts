@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentColumnWidth, databaseRowGroups, defaultColumnWidth, externalUrl, matchingMultiSelectOptions, resizedColumnWidth, visibleDatabaseRows, type DatabaseColumn, type DatabaseRow } from "./database";
+import { contentColumnWidth, databaseRowGroups, defaultColumnWidth, externalUrl, matchingMultiSelectOptions, nextColumnSort, resizedColumnWidth, sortDatabaseRows, visibleDatabaseRows, type DatabaseColumn, type DatabaseRow } from "./database";
 
 describe("multi-select suggestions", () => {
   const options = ["Website", "Web app", "Mobile website", "Research"];
@@ -55,6 +55,26 @@ describe("database views", () => {
     expect(databaseRowGroups(rows, columns[1]).map((group) => [group.label, group.rows.length])).toEqual([
       ["Ready, Important", 1], ["Blocked", 1], ["Empty", 1],
     ]);
+  });
+
+  it("sorts text and numbers in either direction while keeping empty cells last", () => {
+    const score: DatabaseColumn = { id: "score", name: "Score", type: "number", options: [] };
+    const scores: DatabaseRow[] = [
+      { id: "10", cells: { score: "10" } },
+      { id: "empty", cells: { score: "" } },
+      { id: "2", cells: { score: "2" } },
+    ];
+    expect(sortDatabaseRows(scores, score, false).map((row) => row.id)).toEqual(["2", "10", "empty"]);
+    expect(sortDatabaseRows(scores, score, true).map((row) => row.id)).toEqual(["10", "2", "empty"]);
+    expect(sortDatabaseRows(rows, columns[0], true).map((row) => row.id)).toEqual(["3", "2", "1"]);
+    expect(scores[0].id).toBe("10");
+  });
+
+  it("starts a new column ascending and alternates direction on repeat clicks", () => {
+    expect(nextColumnSort("", false, "name")).toEqual({ sortBy: "name", sortDescending: false });
+    expect(nextColumnSort("score", true, "name")).toEqual({ sortBy: "name", sortDescending: false });
+    expect(nextColumnSort("name", false, "name")).toEqual({ sortBy: "name", sortDescending: true });
+    expect(nextColumnSort("name", true, "name")).toEqual({ sortBy: "name", sortDescending: false });
   });
 });
 

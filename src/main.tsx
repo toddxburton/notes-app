@@ -8,3 +8,17 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </StrictMode>,
 );
+
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").then((registration) => {
+      const announce = () => {
+        if (registration.waiting) window.dispatchEvent(new CustomEvent("noted-update-ready"));
+      };
+      announce();
+      registration.addEventListener("updatefound", () => {
+        registration.installing?.addEventListener("statechange", announce);
+      });
+    }).catch(() => undefined);
+  });
+}

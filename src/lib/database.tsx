@@ -1,6 +1,6 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { ChevronDown, Pencil, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Pencil, Search } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -54,6 +54,23 @@ export function visibleDatabaseRows(rows: DatabaseRow[], columns: DatabaseColumn
     if (filter.operator === "equals") return Array.isArray(value) ? value.some((item) => item.toLocaleLowerCase() === needle) : text === needle;
     return text.includes(needle);
   });
+}
+
+export function sortDatabaseRows(rows: DatabaseRow[], column: DatabaseColumn | undefined, descending: boolean): DatabaseRow[] {
+  if (!column) return rows;
+  return [...rows].sort((first, second) => {
+    const left = cellText(first.cells[column.id]).trim();
+    const right = cellText(second.cells[column.id]).trim();
+    if (!left || !right) return Number(!left) - Number(!right);
+    const comparison = column.type === "number" && Number.isFinite(Number(left)) && Number.isFinite(Number(right))
+      ? Number(left) - Number(right)
+      : left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+    return descending ? -comparison : comparison;
+  });
+}
+
+export function nextColumnSort(currentId: string, descending: boolean, clickedId: string) {
+  return { sortBy: clickedId, sortDescending: currentId === clickedId ? !descending : false };
 }
 
 export function databaseRowGroups(rows: DatabaseRow[], column: DatabaseColumn | undefined): { label: string; rows: DatabaseRow[] }[] {
@@ -125,6 +142,8 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
   const rows = (node.attrs.rows ?? []) as DatabaseRow[];
   const filter = (node.attrs.filter ?? null) as DatabaseFilter | null;
   const groupBy = String(node.attrs.groupBy ?? "");
+  const sortBy = String(node.attrs.sortBy ?? "");
+  const sortDescending = Boolean(node.attrs.sortDescending);
   const wrap = Boolean(node.attrs.wrap);
   const rootRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<null | { columnId: string; startX: number; startWidth: number; widths: Record<string, number> }>(null);
@@ -141,6 +160,7 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
   const [editingUrl, setEditingUrl] = useState<null | { rowId: string; columnId: string }>(null);
   const [search, setSearch] = useState("");
   const [showFilter, setShowFilter] = useState(false);
+  const [renamingColumn, setRenamingColumn] = useState<null | { id: string; name: string }>(null);
 
   useLayoutEffect(() => {
     if (!textEditor || !textEditorRef.current) return;
@@ -260,6 +280,14 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
 
   function changeColumn(id: string, change: Partial<DatabaseColumn>) {
     updateAttributes({ columns: columns.map((column) => column.id === id ? { ...column, ...change } : column) });
+  }
+
+  function finishColumnRename() {
+    if (!renamingColumn) return;
+    const current = columns.find((column) => column.id === renamingColumn.id);
+    const name = renamingColumn.name.trim();
+    if (current && name && name !== current.name) changeColumn(current.id, { name });
+    setRenamingColumn(null);
   }
 
   function changeCell(rowId: string, columnId: string, value: string | string[]) {
@@ -443,7 +471,7 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
   const columnWidths = columns.map((column) => resizeWidths?.[column.id]
     ?? (column.width === undefined ? contentColumnWidth(column, rows, measure) : resizedColumnWidth(column.width, 0)));
   const tableWidth = `${columnWidths.reduce((sum, width) => sum + width, 36)}px`;
-  const visibleRows = visibleDatabaseRows(rows, columns, search, filter);
+  const visibleRows = sortDatabaseRows(visibleDatabaseRows(rows, columns, search, filter), columns.find((column) => column.id === sortBy), sortDescending);
   const groups = databaseRowGroups(visibleRows, columns.find((column) => column.id === groupBy));
 
   return <NodeViewWrapper className="inline-database" contentEditable={false}>
@@ -478,13 +506,23 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
           <col style={{ width: 36 }} />
         </colgroup>
         <thead><tr>
-          {columns.map((column, index) => <th key={column.id} data-column-id={column.id}>
+          {columns.map((column, index) => <th key={column.id} data-column-id={column.id}
+            onContextMenu={(event) => { event.preventDefault(); if ((event.target as HTMLElement).closest("input")) return; setPopover(null); setRenamingColumn({ id: column.id, name: column.name }); }}>
             <div className="database-column-heading">
-              <button type="button" aria-label={`Edit ${column.name} column`}
+              {renamingColumn?.id === column.id ? <input className="database-column-inline-name" autoFocus aria-label={`Rename ${column.name} column`}
+                value={renamingColumn.name} onChange={(event) => setRenamingColumn({ id: column.id, name: event.target.value })}
+                onFocus={(event) => event.currentTarget.select()} onBlur={finishColumnRename}
+                onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); else if (event.key === "Escape") { event.preventDefault(); setRenamingColumn(null); } }} />
+              : <button type="button" className="database-column-options" aria-label={`Options for ${column.name} column`}
                 data-database-menu-trigger
                 aria-expanded={popover?.kind === "edit" && popover.columnId === column.id}
                 onClick={(event) => openPopover(event, "edit", column.id)}>
-                <span>{column.name || "Untitled"}</span><ChevronDown size={14} aria-hidden="true" />
+                <span>{column.name || "Untitled"}</span>
+              </button>}
+              <button type="button" className="database-column-sort" aria-label={`Sort ${column.name} ${sortBy === column.id && !sortDescending ? "descending" : "ascending"}`}
+                aria-pressed={sortBy === column.id} title={`Sort ${column.name} ${sortBy === column.id && !sortDescending ? "descending" : "ascending"}`}
+                onClick={() => { updateAttributes(nextColumnSort(sortBy, sortDescending, column.id)); setPopover(null); }}>
+                {sortBy === column.id ? sortDescending ? <ArrowDown size={14} /> : <ArrowUp size={14} /> : <ChevronDown size={14} />}
               </button>
             </div>
             <span className="database-column-resize" role="separator" aria-label={`Resize ${column.name} column`}
@@ -572,6 +610,12 @@ function DatabaseView({ node, updateAttributes, deleteNode }: NodeViewProps) {
       const column = columns.find((item) => item.id === popover.columnId);
       if (!column) return null;
       return <div className="database-popover" style={{ top: popover.top, left: popover.left }}>
+        <div className="database-popover-caption">Sort rows</div>
+        <div className="database-sort-actions">
+          <button type="button" aria-pressed={sortBy === column.id && !sortDescending} onClick={() => { updateAttributes({ sortBy: column.id, sortDescending: false }); setPopover(null); }}>Sort ascending ↑</button>
+          <button type="button" aria-pressed={sortBy === column.id && sortDescending} onClick={() => { updateAttributes({ sortBy: column.id, sortDescending: true }); setPopover(null); }}>Sort descending ↓</button>
+          {sortBy === column.id && <button type="button" onClick={() => { updateAttributes({ sortBy: "" }); setPopover(null); }}>Clear sort</button>}
+        </div>
         <label className="database-popover-label">Column name
           <input className="database-popover-name" aria-label="Column name" value={column.name}
             onChange={(event) => changeColumn(column.id, { name: event.target.value })} />
@@ -628,6 +672,8 @@ export const InlineDatabase = Node.create({
       rows: { default: [], parseHTML: (element) => parseArray(element.getAttribute("data-rows")), renderHTML: (attrs) => ({ "data-rows": JSON.stringify(attrs.rows) }) },
       filter: { default: null, parseHTML: (element) => { try { return JSON.parse(element.getAttribute("data-filter") || "null"); } catch { return null; } }, renderHTML: (attrs) => ({ "data-filter": JSON.stringify(attrs.filter) }) },
       groupBy: { default: "", parseHTML: (element) => element.getAttribute("data-group-by") ?? "", renderHTML: (attrs) => ({ "data-group-by": attrs.groupBy }) },
+      sortBy: { default: "", parseHTML: (element) => element.getAttribute("data-sort-by") ?? "", renderHTML: (attrs) => ({ "data-sort-by": attrs.sortBy }) },
+      sortDescending: { default: false, parseHTML: (element) => element.getAttribute("data-sort-descending") === "true", renderHTML: (attrs) => ({ "data-sort-descending": String(attrs.sortDescending) }) },
       wrap: { default: false, parseHTML: (element) => element.getAttribute("data-wrap") === "true", renderHTML: (attrs) => ({ "data-wrap": String(attrs.wrap) }) },
     };
   },

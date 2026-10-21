@@ -51,6 +51,22 @@ describe("Based local workspace", () => {
     await expect(updateBasedFieldOptions(null, table.id, ["Invalid"])).rejects.toThrow("not found");
   });
 
+  it("filters checked and unchecked records separately", async () => {
+    const database = await createBasedDatabase(null, "Jobs", null, 0);
+    const table = (await loadBasedCatalog(null)).tables.find((item) => item.database_id === database.id)!;
+    const archived = await createBasedField(null, table.id, "Archived", "checkbox", 1);
+    for (const value of [true, false, false]) {
+      const record = await createBasedRecord(null, table.id, await nextBasedRecordOrder(null, table.id));
+      await mergeBasedRecordCells(null, record.id, { [archived.id]: value });
+    }
+    expect((await loadBasedRecords(null, table.id, 0, 100, {
+      filterFieldId: archived.id, filterMode: "equals", filterValue: "false",
+    })).count).toBe(2);
+    expect((await loadBasedRecords(null, table.id, 0, 100, {
+      filterFieldId: archived.id, filterMode: "equals", filterValue: "true",
+    })).count).toBe(1);
+  });
+
   it("keeps two-way links and restores a separate backup", async () => {
     const database = await createBasedDatabase(null, "CRM", null, 0);
     const firstTable = (await loadBasedCatalog(null)).tables[0];
