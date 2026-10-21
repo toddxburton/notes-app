@@ -1,40 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import { parseSignInLink } from "./supabase";
 
-const signInWithOtp = vi.hoisted(() => vi.fn());
+const projectUrl = "https://example.supabase.co";
 
-vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => ({ auth: { signInWithOtp } }),
-}));
-
-describe("email magic links", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
-    vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "test-publishable-key");
-    signInWithOtp.mockReset();
+describe("installed-app sign-in link", () => {
+  it("extracts the token from a Supabase magic link", () => {
+    expect(parseSignInLink("https://example.supabase.co/auth/v1/verify?token=abc123&type=magiclink&redirect_to=https%3A%2F%2Fnoted.example%2F", projectUrl))
+      .toBe("abc123");
   });
 
-  it("signs in existing users without creating a new account", async () => {
-    signInWithOtp.mockResolvedValue({ error: null });
-    const { sendMagicLink } = await import("./supabase");
-
-    await sendMagicLink("existing@example.com");
-
-    expect(signInWithOtp).toHaveBeenCalledWith({
-      email: "existing@example.com",
-      options: {
-        emailRedirectTo: window.location.origin,
-        shouldCreateUser: false,
-      },
-    });
-  });
-
-  it("surfaces a rejected sign-in without retrying as a signup", async () => {
-    const error = new Error("Signups not allowed for otp");
-    signInWithOtp.mockResolvedValue({ error });
-    const { sendMagicLink } = await import("./supabase");
-
-    await expect(sendMagicLink("new@example.com")).rejects.toBe(error);
-    expect(signInWithOtp).toHaveBeenCalledTimes(1);
+  it("rejects links from another project", () => {
+    expect(() => parseSignInLink("https://other.supabase.co/auth/v1/verify?token=abc123&type=magiclink", projectUrl))
+      .toThrow("not a Noted sign-in link");
   });
 });

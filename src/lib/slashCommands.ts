@@ -1,4 +1,5 @@
 import type { Editor } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 import { newDatabase } from "./database";
 
 export type SlashCommandId = "paragraph" | "heading-1" | "heading-2" | "heading-3" | "checklist" | "quote" | "database";
@@ -14,6 +15,7 @@ export type SlashCommandMatch = {
   from: number;
   to: number;
   query: string;
+  trigger: "/" | "\\";
 };
 
 export const slashCommandOptions: SlashCommandOption[] = [
@@ -73,14 +75,25 @@ export function getSlashCommandMatch(editor: Editor): SlashCommandMatch | null {
   const { selection } = editor.state;
   if (!selection.empty || selection.$from.parent.type.name !== "paragraph") return null;
 
-  const textBeforeCursor = selection.$from.parent.textBetween(0, selection.$from.parentOffset, undefined, "\ufffc");
-  if (!textBeforeCursor.startsWith("/") || selection.$from.parent.textContent !== textBeforeCursor) return null;
-  const latestSlash = textBeforeCursor.lastIndexOf("/");
+  const paragraph = selection.$from.parent;
+  const cursor = selection.$from.parentOffset;
+  let lineStart = 0;
+  let lineEnd = paragraph.content.size;
+  paragraph.content.forEach((node, offset) => {
+    if (node.type.name !== "hardBreak") return;
+    if (offset < cursor) lineStart = offset + node.nodeSize;
+    else if (lineEnd === paragraph.content.size) lineEnd = offset;
+  });
+  const textBeforeCursor = paragraph.textBetween(lineStart, cursor, undefined, "\ufffc");
+  const trigger = textBeforeCursor[0];
+  if ((trigger !== "/" && trigger !== "\\") || paragraph.textBetween(lineStart, lineEnd, undefined, "\ufffc") !== textBeforeCursor) return null;
+  const latestSlash = textBeforeCursor.lastIndexOf(trigger);
 
   return {
-    from: selection.$from.start(),
+    from: selection.$from.start() + lineStart,
     to: selection.from,
     query: textBeforeCursor.slice(latestSlash + 1),
+    trigger,
   };
 }
 
@@ -89,7 +102,9 @@ export function applySlashCommand(
   commandId: SlashCommandId,
   range: Pick<SlashCommandMatch, "from" | "to">,
 ): boolean {
-  const chain = editor.chain().focus().deleteRange(range);
+  const isolated = isolateSlashLine(editor, range);
+  const chain = editor.chain().focus();
+  if (!isolated) chain.deleteRange(range);
 
   switch (commandId) {
     case "paragraph":
@@ -107,4 +122,65 @@ export function applySlashCommand(
     case "database":
       return chain.insertContent([{ type: "inlineDatabase", attrs: newDatabase() }, { type: "paragraph" }]).run();
   }
+}
+
+function isolateSlashLine(editor: Editor, range: Pick<SlashCommandMatch, "from" | "to">): boolean {
+  const { $from } = editor.state.selection;
+  if ($from.depth !== 1 || $from.parent.type.name !== "paragraph") return false;
+  const paragraph = $from.parent;
+  const lineStart = range.from - $from.start();
+  let lineEnd = paragraph.content.size;
+  paragraph.content.forEach((node, offset) => {
+    if (node.type.name === "hardBreak" && offset >= range.to - $from.start() && lineEnd === paragraph.content.size) lineEnd = offset;
+  });
+  if (!lineStart && lineEnd === paragraph.content.size) return false;
+
+  const paragraphType = editor.schema.nodes.paragraph;
+  const before = lineStart ? paragraphType.create(paragraph.attrs, paragraph.content.cut(0, lineStart - 1)) : null;
+  const after = lineEnd < paragraph.content.size
+    ? paragraphType.create(paragraph.attrs, paragraph.content.cut(lineEnd + 1))
+    : null;
+  const blockStart = $from.before(1);
+  const transaction = editor.state.tr.replaceWith(
+    blockStart,
+    blockStart + paragraph.nodeSize,
+    [before, paragraphType.create(paragraph.attrs), after].filter((node) => node !== null),
+  );
+  transaction.setSelection(TextSelection.create(transaction.doc, blockStart + (before?.nodeSize ?? 0) + 1));
+  editor.view.dispatch(transaction);
+  return true;
+}
+
+export function insertBlockFromPicker(editor: Editor, commandId: SlashCommandId): boolean {
+  const { doc, selection } = editor.state;
+  const topLevelStart = selection.$from.before(1);
+  const currentBlock = doc.nodeAt(topLevelStart);
+  if (!currentBlock) return false;
+
+  const content = commandId === "database"
+    ? [{ type: "inlineDatabase", attrs: newDatabase() }, { type: "paragraph" }]
+    : commandId === "checklist"
+      ? [{ type: "taskList", content: [{ type: "taskItem", content: [{ type: "paragraph" }] }] }]
+      : commandId === "quote"
+        ? [{ type: "blockquote", content: [{ type: "paragraph" }] }]
+        : [{ type: commandId === "paragraph" ? "paragraph" : "heading", attrs: commandId === "paragraph" ? undefined : { level: Number(commandId.slice(-1)) } }];
+
+  const replaceEmptyParagraph = currentBlock.type.name === "paragraph" && currentBlock.content.size === 0;
+  if (replaceEmptyParagraph && commandId === "paragraph") return editor.chain().focus().run();
+  const from = replaceEmptyParagraph ? topLevelStart : topLevelStart + currentBlock.nodeSize;
+  const to = replaceEmptyParagraph ? topLevelStart + currentBlock.nodeSize : from;
+  if (!editor.chain().insertContentAt({ from, to }, content).run()) return false;
+  const insertedNode = editor.state.doc.nodeAt(from);
+  if (!insertedNode) return false;
+  let cursor = from + insertedNode.nodeSize + 1;
+  if (commandId !== "database") {
+    editor.state.doc.nodesBetween(from, from + insertedNode.nodeSize, (node, position) => {
+      if (node.isTextblock) {
+        cursor = position + 1;
+        return false;
+      }
+      return true;
+    });
+  }
+  return editor.chain().setTextSelection(cursor).focus().run();
 }

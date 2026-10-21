@@ -121,6 +121,65 @@ describe("block reordering", () => {
 });
 
 describe("selected block conversion", () => {
+  it("changes only the selected line to H3 in an Enter-separated paragraph", () => {
+    const editor = new Editor({ extensions: editorExtensions, content: "<p>Before<br>Selected line<br>After</p>" });
+    editor.commands.setTextSelection(1);
+
+    expect(changeSelectedBlock(editor, "heading-3", { from: 10, to: 17 })).toBe(true);
+    expect(editor.getJSON().content).toMatchObject([
+      { type: "paragraph", content: [{ type: "text", text: "Before" }] },
+      { type: "heading", attrs: { level: 3 }, content: [{ type: "text", text: "Selected line" }] },
+      { type: "paragraph", content: [{ type: "text", text: "After" }] },
+    ]);
+    expect(editor.commands.undo()).toBe(true);
+    expect(editor.getJSON().content?.map((node) => node.type)).toEqual(["paragraph"]);
+    editor.destroy();
+  });
+
+  it("changes selected lines without converting adjacent paragraphs", () => {
+    const editor = new Editor({ extensions: editorExtensions, content: "<p>Before<br>Alpha<br>Beta<br>After</p><p>Separate</p>" });
+
+    expect(changeSelectedBlock(editor, "heading-3", { from: 8, to: 18 })).toBe(true);
+    expect(editor.getJSON().content?.map((node) => node.type)).toEqual([
+      "paragraph", "heading", "heading", "paragraph", "paragraph",
+    ]);
+    expect(editor.getJSON().content?.slice(1, 3).map((node) => node.attrs?.level)).toEqual([3, 3]);
+    editor.destroy();
+  });
+
+  it("turns highlighted lines into separate bullets without changing surrounding lines", () => {
+    const editor = new Editor({ extensions: editorExtensions, content: "<p>Before<br>Alpha<br>Beta<br>After</p>" });
+    // The format picker can collapse the editor's selection on mobile, so pass its saved range.
+    editor.commands.setTextSelection(1);
+
+    expect(changeSelectedBlock(editor, "bulletList", { from: 8, to: 18 })).toBe(true);
+    expect(editor.getJSON().content).toMatchObject([
+      { type: "paragraph", content: [{ type: "text", text: "Before" }] },
+      { type: "bulletList", content: [
+        { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Alpha" }] }] },
+        { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Beta" }] }] },
+      ] },
+      { type: "paragraph", content: [{ type: "text", text: "After" }] },
+    ]);
+    expect(editor.commands.undo()).toBe(true);
+    expect(contentToPlainText(editor.getJSON())).toBe("Before\nAlpha\nBeta\nAfter");
+    editor.destroy();
+  });
+
+  it("lists only one selected line when it shares a paragraph with other lines", () => {
+    const editor = new Editor({ extensions: editorExtensions, content: "<p>Before<br>Alpha<br>Beta<br>After</p>" });
+    editor.commands.setTextSelection({ from: 14, to: 18 });
+
+    expect(changeSelectedBlock(editor, "orderedList")).toBe(true);
+    expect(editor.getJSON().content?.map((node) => node.type)).toEqual(["paragraph", "orderedList", "paragraph"]);
+    expect(editor.getJSON().content?.[0]?.content?.map((node) => node.type)).toEqual(["text", "hardBreak", "text"]);
+    expect(editor.getJSON().content?.[1]?.content).toHaveLength(1);
+    expect(editor.getJSON().content?.[1]).toMatchObject({
+      type: "orderedList", content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Beta" }] }] }],
+    });
+    editor.destroy();
+  });
+
   it("changes a heading to another heading or text", () => {
     const editor = new Editor({ extensions: editorExtensions, content: "<h1>Heading</h1>" });
     editor.commands.setTextSelection({ from: 1, to: 8 });

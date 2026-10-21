@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { ArchiveRestore, ChevronDown, ChevronRight, Download, Ellipsis, FolderPlus, PanelLeftClose, PanelLeftOpen, Plus, Search, Upload, X } from "lucide-react";
-import { resizedColumnWidth } from "./lib/database";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, Download, Ellipsis, FolderPlus, PanelLeftClose, PanelLeftOpen, Plus, Search, Upload, X } from "lucide-react";
+import { nextColumnSort, resizedColumnWidth } from "./lib/database";
 import {
   basedUpdate, createBasedDatabase, createBasedField, createBasedFolder,
   createBasedRecord, createBasedRelation, createBasedTable, exportBased, restoreBased,
@@ -10,9 +10,12 @@ import {
 import { basedFieldTypes, type BasedBackup, type BasedCatalog, type BasedDatabase, type BasedField,
   type BasedFolder, type BasedLink, type BasedRecord, type BasedTable } from "./lib/basedTypes";
 import { isSupabaseConfigured, signOut } from "./lib/supabase";
+import { useMobileSidebarSwipe } from "./lib/mobileSidebarSwipe";
+import { cacheBasedCatalog, cacheBasedLinks, cacheBasedPage, cacheBasedRecord, clearBasedView, readBasedView, type CachedBasedView } from "./lib/basedViewCache";
+import { activeBasedFilter, basedFilterChoices, type BasedFilter } from "./lib/basedFilter";
 
-type Props = { userId: string | null; onSwitch: () => void; railWidth: number };
-type Filter = { fieldId: string; mode: "contains" | "equals" | "empty" | "notEmpty"; value: string };
+type Props = { userId: string | null; onSwitch: () => void; railWidth: number; online: boolean };
+type Filter = BasedFilter;
 const blankCatalog = (): BasedCatalog => ({ folders: [], databases: [], tables: [], fields: [], relations: [] });
 const rememberedDatabase = (userId: string | null) => `based-last-database-${userId ?? "local"}`;
 const rememberedTable = (userId: string | null) => `based-last-table-${userId ?? "local"}`;
@@ -20,7 +23,7 @@ const order = <T extends { sort_order: number }>(items: T[]) => [...items].sort(
 const nextOrder = <T extends { sort_order: number }>(items: T[]) => Math.max(-1, ...items.map((item) => item.sort_order)) + 1;
 const cellText = (value: unknown) => Array.isArray(value) ? value.join(", ") : value === true ? "Yes" : value === false ? "No" : String(value ?? "");
 
-export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
+export default function BasedApp({ userId, onSwitch, railWidth, online }: Props) {
   const [catalog, setCatalog] = useState<BasedCatalog>(blankCatalog);
   const [databaseId, setDatabaseId] = useState<string | null>(() => localStorage.getItem(rememberedDatabase(userId)));
   const [tableId, setTableId] = useState<string | null>(() => localStorage.getItem(rememberedTable(userId)));
@@ -39,13 +42,16 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortFieldId, setSortFieldId] = useState("");
   const [sortDescending, setSortDescending] = useState(false);
+  const [renamingField, setRenamingField] = useState<null | { id: string; name: string }>(null);
   const [groupFieldId, setGroupFieldId] = useState("");
   const [wrap, setWrap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  const mobileSidebarSwipe = useMobileSidebarSwipe(mobileRailOpen, setMobileRailOpen);
   const [railVisible, setRailVisible] = useState(() => localStorage.getItem("noted-sidebar-visible") !== "false");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [offlineView, setOfflineView] = useState<CachedBasedView | null>(null);
   const [cellMenu, setCellMenu] = useState<{ recordId: string; fieldId: string } | null>(null);
   const [linkSearch, setLinkSearch] = useState("");
   const [linkMatches, setLinkMatches] = useState<BasedRecord[]>([]);
@@ -56,6 +62,31 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const resizeRef = useRef<{ fieldId: string; startX: number; startWidth: number; widths: Record<string, number> } | null>(null);
   const filterButtonRef = useRef<HTMLButtonElement | null>(null);
   const filterPopoverRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (online) { setLoading(true); return; }
+    let active = true;
+    void readBasedView(userId ?? "local-user").then((view) => {
+      if (!active) return;
+      setOfflineView(view);
+      if (view?.catalog) {
+        setCatalog(view.catalog);
+        setLinks(view.links);
+        const preferredDatabase = localStorage.getItem(rememberedDatabase(userId));
+        const selectedDatabase = view.catalog.databases.find((item) => item.id === preferredDatabase && !item.archived_at)
+          ?? view.catalog.databases.find((item) => !item.archived_at);
+        const preferredTable = localStorage.getItem(rememberedTable(userId));
+        const selectedTable = view.catalog.tables.find((item) => item.id === preferredTable && item.database_id === selectedDatabase?.id && !item.archived_at)
+          ?? view.catalog.tables.find((item) => item.database_id === selectedDatabase?.id && !item.archived_at);
+        setDatabaseId(selectedDatabase?.id ?? null);
+        setTableId(selectedTable?.id ?? null);
+        const cachedTable = selectedTable ? view.tables[selectedTable.id] : null;
+        setRecords(cachedTable?.records ?? []);
+        setRecordCount(cachedTable?.count ?? 0);
+      }
+      setLoading(false);
+    }).catch(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [online, userId]);
   function suggest(label: string, value = "", choices?: string[]): Promise<string | null> {
     return new Promise((resolve) => { questionResolver.current = resolve; setQuestion({ label, value, choices }); });
   }
@@ -76,6 +107,9 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   const archivedFields = catalog.fields.filter((item) => item.table_id === table?.id && item.archived_at);
   const visibleFields = fields.filter((field) => !field.hidden);
   const queryableFields = fields.filter((field) => field.type !== "linkedRecord");
+  const filterField = queryableFields.find((field) => field.id === filter?.fieldId);
+  const filterChoices = filterField ? basedFilterChoices(filterField) : null;
+  const appliedFilter = activeBasedFilter(filterField, filter);
   function clearTableControls() {
     setSearch(""); setFilter(null); setFilterOpen(false); setSortFieldId(""); setSortDescending(false);
     setGroupFieldId(""); setOffset(0); setCellMenu(null);
@@ -84,6 +118,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
 
   const refreshCatalog = useCallback(async () => {
     const next = await loadBasedCatalog(userId);
+    void cacheBasedCatalog(userId ?? "local-user", next).catch(() => undefined);
     setCatalog(next);
     const available = next.databases.filter((item) => !item.archived_at);
     setDatabaseId((current) => available.some((item) => item.id === current) ? current : available[0]?.id ?? null);
@@ -95,10 +130,11 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     loadingRowsRef.current = true;
     setLoadingRows(true);
     try {
+    const selectedFilterField = catalog.fields.find((field) => field.id === filter?.fieldId && field.table_id === selectedTableId);
+    const selectedFilter = activeBasedFilter(selectedFilterField, filter);
     const result = await loadBasedRecords(userId, selectedTableId, selectedOffset, 100, {
       search,
-      filterFieldId: catalog.fields.some((field) => field.id === filter?.fieldId && field.table_id === selectedTableId) ? filter?.fieldId : undefined,
-      filterMode: filter?.mode, filterValue: filter?.value,
+      filterFieldId: selectedFilter?.fieldId, filterMode: selectedFilter?.mode, filterValue: selectedFilter?.value,
       sortFieldId: catalog.fields.some((field) => field.id === sortFieldId && field.table_id === selectedTableId) ? sortFieldId : undefined,
       descending: sortDescending,
       groupFieldId: catalog.fields.some((field) => field.id === groupFieldId && field.table_id === selectedTableId) ? groupFieldId : undefined,
@@ -108,6 +144,8 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
         ...current, ...result.records.filter((record) => !current.some((item) => item.id === record.id)),
       ]);
       setRecordCount(result.count);
+      if (!search && !selectedFilter && !sortFieldId && !sortDescending && !groupFieldId)
+        void cacheBasedPage(userId ?? "local-user", selectedTableId, selectedOffset, result).catch(() => undefined);
     }
     } finally {
       if (requestId === rowRequestId.current) { loadingRowsRef.current = false; setLoadingRows(false); }
@@ -115,6 +153,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }, [userId, search, filter?.fieldId, filter?.mode, filter?.value, sortFieldId, sortDescending, groupFieldId, catalog.fields]);
 
   useEffect(() => {
+    if (!online) return;
     if (!filterOpen) return;
     const dismiss = (event: PointerEvent) => {
       if (!filterPopoverRef.current?.contains(event.target as Node) &&
@@ -135,21 +174,24 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }, [filterOpen]);
 
   useEffect(() => {
+    if (!online) return;
     let active = true;
     void refreshCatalog().then(async (next) => {
       if (!active) return;
       if (isSupabaseConfigured && await needsBasedBackup(userId)) await saveBasedBackup(userId, await exportBased(userId));
     }).catch((caught) => setError(String(caught))).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [refreshCatalog, userId]);
+  }, [refreshCatalog, userId, online]);
 
   useEffect(() => {
+    if (!online) return;
     if (databaseId) localStorage.setItem(rememberedDatabase(userId), databaseId);
     const selected = catalog.tables.find((item) => item.id === tableId && item.database_id === databaseId && !item.archived_at);
     if (!selected) setTableId(order(catalog.tables.filter((item) => item.database_id === databaseId && !item.archived_at))[0]?.id ?? null);
   }, [databaseId, catalog.tables, tableId, userId]);
 
   useEffect(() => {
+    if (!online) return;
     if (!table) { setRecords([]); setRecordCount(0); return; }
     localStorage.setItem(rememberedTable(userId), table.id);
     let active = true;
@@ -166,16 +208,19 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }
 
   useEffect(() => {
+    if (!online) return;
     const element = document.querySelector<HTMLDivElement>(".based-grid-scroll");
     if (element) loadMoreRows(element);
   }, [records.length, recordCount, table?.id]);
 
   useEffect(() => {
+    if (!online) return;
     if (!table) { setArchivedRecords([]); return; }
     void loadArchivedBasedRecords(userId, table.id).then(setArchivedRecords).catch((caught) => setError(String(caught)));
   }, [table?.id, userId]);
 
   useEffect(() => {
+    if (!online) return;
     if (!database) return;
     let active = true;
     const relations = catalog.relations.filter((item) => item.database_id === database.id);
@@ -183,12 +228,14 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     void loadBasedLinks(userId)
       .then((allLinks) => {
         if (!active) return;
+        void cacheBasedLinks(userId ?? "local-user", allLinks).catch(() => undefined);
         setLinks(allLinks.filter((item) => relations.some((relation) => relation.id === item.relation_id)));
       }).catch((caught) => setError(String(caught)));
     return () => { active = false; };
   }, [catalog.relations, database?.id, tableId, userId]);
 
   useEffect(() => {
+    if (!online) return;
     if (!table || !records.length || !links.length) return;
     const visibleIds = new Set(records.filter((record) => record.table_id === table.id).map((record) => record.id));
     const linkedIds = links.flatMap((link) => {
@@ -217,6 +264,7 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }, [catalog.relations, links, records, relatedRecords, table?.id, userId]);
 
   useEffect(() => {
+    if (!online) return;
     const field = catalog.fields.find((item) => item.id === cellMenu?.fieldId);
     if (!field || field.type !== "linkedRecord") return;
     const relation = catalog.relations.find((item) => item.id === field.relation_id);
@@ -315,7 +363,10 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
     setRecords((current) => current.map((item) => item.id === record.id
       ? { ...item, cells: { ...item.cells, [field.id]: value } } : item));
     await run(async () => {
-      try { await mergeBasedRecordCells(userId, record.id, { [field.id]: value }); }
+      try {
+        const saved = await mergeBasedRecordCells(userId, record.id, { [field.id]: value });
+        void cacheBasedRecord(userId ?? "local-user", saved).catch(() => undefined);
+      }
       catch (caught) { await reloadRows(); throw caught; }
     });
   }
@@ -326,6 +377,13 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }
   async function saveField(field: BasedField, changes: Partial<BasedField>) {
     await run(async () => { await basedUpdate<BasedField>("based_fields", field.id, changes, userId); await refreshCatalog(); });
+  }
+  function finishFieldRename() {
+    if (!renamingField) return;
+    const field = fields.find((item) => item.id === renamingField.id);
+    const name = renamingField.name.trim();
+    if (field && name && name !== field.name) void saveField(field, { name });
+    setRenamingField(null);
   }
   function startColumnResize(event: React.PointerEvent<HTMLSpanElement>, fieldId: string) {
     if (event.button !== 0) return;
@@ -441,6 +499,38 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
   }
 
   const displayed = records;
+  if (!online) {
+    const offlineDatabase = offlineView?.catalog?.databases.find((item) => item.id === databaseId && !item.archived_at);
+    const offlineTables = order(offlineView?.catalog?.tables.filter((item) => item.database_id === databaseId && !item.archived_at) ?? []);
+    const offlineTable = offlineTables.find((item) => item.id === tableId) ?? offlineTables[0];
+    const offlineFields = order(offlineView?.catalog?.fields.filter((item) => item.table_id === offlineTable?.id && !item.archived_at && !item.hidden) ?? []);
+    const offlineRecords = offlineView?.tables[offlineTable?.id ?? ""]?.records ?? [];
+    if (loading) return <main className="loading-page">Opening cached Based view…</main>;
+    return <div className="app-shell based-app" style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+      <aside className="document-rail" aria-label="Cached Based databases">
+        <div className="rail-actions"><button type="button" className="rail-brand based-brand" onClick={onSwitch}>Based</button>
+          <div className="rail-tools"><button className="mobile-rail-close" onClick={onSwitch}>Notes</button></div></div>
+        <div className="document-list"><p className="rail-label">Databases</p>
+          {(offlineView?.catalog?.databases ?? []).filter((item) => !item.archived_at).map((item) => <button key={item.id}
+            className={`based-sidebar-item ${databaseId === item.id ? "is-selected" : ""}`} onClick={() => {
+              const nextTable = order(offlineView?.catalog?.tables.filter((tableItem) => tableItem.database_id === item.id && !tableItem.archived_at) ?? [])[0];
+              setDatabaseId(item.id); setTableId(nextTable?.id ?? null); setRecords(offlineView?.tables[nextTable?.id ?? ""]?.records ?? []);
+            }}>{item.name}</button>)}
+          {!offlineView?.catalog && <p className="empty-list">No cached Based view yet. Open Based while online to save one.</p>}
+        </div>
+      </aside>
+      <main className="workspace"><header className="workspace-header"><span className="document-breadcrumb">{offlineDatabase?.name ?? "Based"}</span>
+        <div className="header-actions"><span className="based-save-label">Offline view · read only</span><button className="header-button" onClick={onSwitch}>Open notes</button></div></header>
+        {!offlineTable ? <div className="based-empty">No cached table view for this database.</div> : <div className="based-table-area">
+          <div className="based-tabs" role="tablist" aria-label="Cached tables">{offlineTables.map((item) => <button key={item.id} role="tab" aria-selected={offlineTable.id === item.id}
+            className={offlineTable.id === item.id ? "is-active" : ""} onClick={() => { setTableId(item.id); setRecords(offlineView?.tables[item.id]?.records ?? []); }}>{item.name}</button>)}</div>
+          <div className="based-grid-scroll"><table className="based-grid"><thead><tr><th>#</th>{offlineFields.map((field) => <th key={field.id}>{field.name}</th>)}</tr></thead>
+            <tbody>{offlineRecords.map((record, index) => <tr key={record.id}><td>{index + 1}</td>{offlineFields.map((field) => <td key={field.id}>{cellText(record.cells[field.id])}</td>)}</tr>)}</tbody>
+          </table>{offlineRecords.length < (offlineView?.tables[offlineTable.id]?.count ?? 0) && <p className="empty-list">Showing {offlineRecords.length} of {offlineView?.tables[offlineTable.id]?.count} records cached for this table.</p>}
+          </div></div>}
+      </main>
+    </div>;
+  }
   const canvas = typeof document !== "undefined" ? document.createElement("canvas") : null;
   const context = canvas?.getContext("2d");
   if (context) context.font = "13px Inter, sans-serif";
@@ -461,13 +551,15 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
       const backup = JSON.parse(await file.text()) as BasedBackup;
       if (backup.format !== "based-workspace" || backup.version !== 1) throw new Error("Unsupported Based backup.");
       if (!await confirmAction("Replace all Based data with this backup? Noted notes will not change.", "Replace")) return;
-      await restoreBased(userId, backup); await refreshCatalog();
+      await restoreBased(userId, backup);
+      await clearBasedView(userId ?? "local-user");
+      await refreshCatalog();
     });
   }
 
   const activeDatabases = order(catalog.databases.filter((item) => !item.archived_at && item.name.toLowerCase().includes(sidebarSearch.toLowerCase())));
   const archivedDatabases = catalog.databases.filter((item) => item.archived_at);
-  return <div className={`app-shell based-app ${railVisible ? "" : "rail-hidden"} ${mobileRailOpen ? "mobile-rail-open" : ""}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties}>
+  return <div className={`app-shell based-app ${railVisible ? "" : "rail-hidden"} ${mobileRailOpen ? "mobile-rail-open" : ""}`} style={{ "--rail": `${railWidth}px` } as React.CSSProperties} {...mobileSidebarSwipe}>
     <button type="button" className="mobile-rail-backdrop" aria-label="Close sidebar" onClick={() => setMobileRailOpen(false)} />
     <aside className="document-rail" aria-label="Based databases" id="based-rail">
       <div className="rail-actions">
@@ -564,23 +656,36 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
               void run(async () => { await basedUpdate<BasedTable>("based_tables", table.id, { archived_at: new Date().toISOString() }, userId); await refreshCatalog(); });
             }}>Archive table</button>
             <input aria-label="Search rows" placeholder="Search rows" value={search} onChange={(event) => { setSearch(event.target.value); setOffset(0); }} />
-            <button ref={filterButtonRef} type="button" className={filter ? "is-active" : ""} aria-label="Filter records" aria-expanded={filterOpen}
-              onClick={() => setFilterOpen((open) => !open)}>Filter{filter ? " · 1" : ""}</button>
+            <button ref={filterButtonRef} type="button" className={appliedFilter ? "is-active" : ""} aria-label="Filter records" aria-expanded={filterOpen}
+              onClick={() => setFilterOpen((open) => !open)}>Filter{appliedFilter ? " · 1" : ""}</button>
             <select aria-label="Sort field" value={sortFieldId} onChange={(event) => { setSortFieldId(event.target.value); setOffset(0); }}><option value="">Sort</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
-            {sortFieldId && <button onClick={() => { setSortDescending((current) => !current); setOffset(0); }}>{sortDescending ? "↓" : "↑"}</button>}
+            {sortFieldId && <button aria-label={`Sort ${sortDescending ? "descending" : "ascending"}; change direction`} onClick={() => { setSortDescending((current) => !current); setOffset(0); }}>{sortDescending ? "↓" : "↑"}</button>}
             <select aria-label="Group field" value={groupFieldId} onChange={(event) => { setGroupFieldId(event.target.value); setOffset(0); }}><option value="">Group</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
             <button aria-pressed={wrap} onClick={() => setWrap((current) => !current)}>Wrap {wrap ? "on" : "off"}</button>
             <button onClick={() => void addField()}>＋ Column</button>
           </div>
           <div className="based-grid-scroll" onScroll={(event) => loadMoreRows(event.currentTarget)}><table className={`based-grid ${wrap ? "is-wrapped" : ""}`} style={{ width: fieldWidths.reduce((sum, width) => sum + width, 84) }}>
             <colgroup><col style={{ width: 44 }} />{visibleFields.map((field, index) => <col key={field.id} style={{ width: fieldWidths[index] }} />)}<col style={{ width: 40 }} /></colgroup>
-            <thead><tr><th className="based-row-number">#</th>{visibleFields.map((field) => <th key={field.id} data-field-id={field.id}>
-              <button className="based-field-name" onClick={async () => {
-                const name = await suggest("Rename column", field.name); if (name) void saveField(field, { name });
-              }}>{field.name}<ChevronDown size={13} /></button>
+            <thead><tr><th className="based-row-number">#</th>{visibleFields.map((field) => <th key={field.id} data-field-id={field.id}
+              onContextMenu={(event) => { event.preventDefault(); if ((event.target as HTMLElement).closest("input")) return; setRenamingField({ id: field.id, name: field.name }); }}>
+              <div className="based-field-heading">
+                {renamingField?.id === field.id ? <input className="based-field-inline-name" autoFocus aria-label={`Rename ${field.name} column`}
+                  value={renamingField.name} onChange={(event) => setRenamingField({ id: field.id, name: event.target.value })}
+                  onFocus={(event) => event.currentTarget.select()} onBlur={finishFieldRename}
+                  onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); else if (event.key === "Escape") { event.preventDefault(); setRenamingField(null); } }} />
+                : <span className="based-field-name">{field.name}</span>}
+                <button type="button" className="based-field-sort" disabled={field.type === "linkedRecord"}
+                  aria-label={`Sort ${field.name} ${sortFieldId === field.id && !sortDescending ? "descending" : "ascending"}`}
+                  aria-pressed={sortFieldId === field.id}
+                  title={field.type === "linkedRecord" ? "Linked record columns cannot be sorted" : `Sort ${field.name} ${sortFieldId === field.id && !sortDescending ? "descending" : "ascending"}`}
+                  onClick={() => { const next = nextColumnSort(sortFieldId, sortDescending, field.id); setSortFieldId(next.sortBy); setSortDescending(next.sortDescending); setOffset(0); }}>
+                  {sortFieldId === field.id ? sortDescending ? <ArrowDown size={13} /> : <ArrowUp size={13} /> : <ChevronDown size={13} />}
+                </button>
+              </div>
               <button className="based-field-settings" aria-label={`Settings for ${field.name}`} onClick={async () => {
-                const action = await suggest("Column action", "options", ["options", "hide", "width", "move left", "move right", "archive"]);
-                if (action === "options" && (field.type === "singleSelect" || field.type === "multiSelect")) {
+                const action = await suggest("Column action", "rename", ["rename", "options", "hide", "width", "move left", "move right", "archive"]);
+                if (action === "rename") setRenamingField({ id: field.id, name: field.name });
+                else if (action === "options" && (field.type === "singleSelect" || field.type === "multiSelect")) {
                   const values = await suggest("Options, separated by commas", field.options.join(", "));
                   if (values !== null) void saveField(field, { options: values.split(",").map((item) => item.trim()).filter(Boolean) });
                 } else if (action === "hide") void saveField(field, { hidden: true });
@@ -634,12 +739,20 @@ export default function BasedApp({ userId, onSwitch, railWidth }: Props) {
       <div className="based-filter-heading"><strong>Filter records</strong><button type="button" aria-label="Close filters" onClick={() => setFilterOpen(false)}><X size={15} /></button></div>
       <p>Show records where</p>
       <div className="based-filter-condition">
-        <select autoFocus aria-label="Filter field" value={filter?.fieldId ?? ""} onChange={(event) => { setFilter(event.target.value ? { fieldId: event.target.value, mode: "contains", value: "" } : null); setOffset(0); }}>
+        <select autoFocus aria-label="Filter field" value={filter?.fieldId ?? ""} onChange={(event) => {
+          const field = queryableFields.find((item) => item.id === event.target.value);
+          setFilter(field ? { fieldId: field.id, mode: basedFilterChoices(field) ? "equals" : "contains", value: "" } : null);
+          setOffset(0);
+        }}>
           <option value="">Choose a field</option>{queryableFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
         </select>
         {filter && <><select aria-label="Filter condition" value={filter.mode} onChange={(event) => { setFilter({ ...filter, mode: event.target.value as Filter["mode"] }); setOffset(0); }}>
-          <option value="contains">contains</option><option value="equals">is</option><option value="empty">is empty</option><option value="notEmpty">is not empty</option></select>
-          {(filter.mode === "contains" || filter.mode === "equals") && <input aria-label="Filter value" placeholder="Enter a value" value={filter.value} onChange={(event) => { setFilter({ ...filter, value: event.target.value }); setOffset(0); }} />}</>}
+          {!filterChoices && <option value="contains">contains</option>}<option value="equals">is</option>
+          {filterField?.type !== "checkbox" && <><option value="empty">is empty</option><option value="notEmpty">is not empty</option></>}
+        </select>{filter.mode === "equals" && filterChoices ? <select aria-label="Filter value" value={filter.value}
+          onChange={(event) => { setFilter({ ...filter, value: event.target.value }); setOffset(0); }}>
+          <option value="">Choose a value</option>{filterChoices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </select> : (filter.mode === "contains" || filter.mode === "equals") && <input aria-label="Filter value" placeholder="Enter a value" value={filter.value} onChange={(event) => { setFilter({ ...filter, value: event.target.value }); setOffset(0); }} />}</>}
       </div>
       {filter && <button type="button" className="based-filter-clear" onClick={() => { setFilter(null); setOffset(0); }}>Clear condition</button>}
     </div>}

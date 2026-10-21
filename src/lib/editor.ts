@@ -61,7 +61,10 @@ export const editorExtensions = [
   InlineDatabase,
 ];
 
-export function changeSelectedBlock(editor: Editor, value: string): boolean {
+export function changeSelectedBlock(editor: Editor, value: string, selectedRange?: { from: number; to: number }): boolean {
+  if (selectedRange) editor.commands.setTextSelection(selectedRange);
+  if (value.startsWith("heading-") && headingSelectedLines(editor, Number(value.slice(-1)) as 1 | 2 | 3)) return true;
+  if (["bulletList", "orderedList", "taskList"].includes(value) && listSelectedLines(editor, value)) return true;
   const chain = editor.chain().focus();
   const activeList = editor.isActive("bulletList") ? "bulletList" : editor.isActive("orderedList") ? "orderedList" : editor.isActive("taskList") ? "taskList" : null;
   const activeQuote = editor.isActive("blockquote");
@@ -78,6 +81,93 @@ export function changeSelectedBlock(editor: Editor, value: string): boolean {
   else if (value === "taskList" && activeList !== value) chain.toggleTaskList();
   else if (value === "blockquote" && !activeQuote) chain.toggleBlockquote();
   return chain.run();
+}
+
+function headingSelectedLines(editor: Editor, level: 1 | 2 | 3): boolean {
+  const { selection, schema } = editor.state;
+  const { $from, $to } = selection;
+  if (selection.empty || $from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== "paragraph") return false;
+
+  const paragraph = $from.parent;
+  const lines: Array<{ from: number; to: number }> = [];
+  let lineStart = 0;
+  paragraph.content.forEach((node, offset) => {
+    if (node.type.name === "hardBreak") {
+      lines.push({ from: lineStart, to: offset });
+      lineStart = offset + node.nodeSize;
+    }
+  });
+  if (!lines.length) return false;
+  lines.push({ from: lineStart, to: paragraph.content.size });
+
+  const paragraphStart = $from.start();
+  const first = lines.findIndex((line) => paragraphStart + line.from < selection.to && paragraphStart + line.to > selection.from);
+  let last = -1;
+  lines.forEach((line, index) => {
+    if (paragraphStart + line.from < selection.to && paragraphStart + line.to > selection.from) last = index;
+  });
+  if (first < 0 || last < first) return false;
+
+  const before = first ? schema.nodes.paragraph.create(paragraph.attrs, paragraph.content.cut(0, lines[first].from - 1)) : null;
+  const after = last < lines.length - 1
+    ? schema.nodes.paragraph.create(paragraph.attrs, paragraph.content.cut(lines[last].to + 1))
+    : null;
+  const headings = lines.slice(first, last + 1).map((line) =>
+    schema.nodes.heading.create({ level }, paragraph.content.cut(line.from, line.to)));
+  const blockStart = $from.before(1);
+  const transaction = editor.state.tr.replaceWith(
+    blockStart, blockStart + paragraph.nodeSize, [before, ...headings, after].filter((node) => node !== null),
+  );
+  transaction.setSelection(Selection.near(transaction.doc.resolve(blockStart + (before?.nodeSize ?? 0) + 1)));
+  editor.view.dispatch(transaction.scrollIntoView());
+  editor.view.focus();
+  return true;
+}
+
+function listSelectedLines(editor: Editor, value: string): boolean {
+  const { selection, schema } = editor.state;
+  const { $from, $to } = selection;
+  if (selection.empty || $from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== "paragraph") return false;
+
+  const paragraph = $from.parent;
+  const lines: Array<{ from: number; to: number }> = [];
+  let lineStart = 0;
+  paragraph.content.forEach((node, offset) => {
+    if (node.type.name === "hardBreak") {
+      lines.push({ from: lineStart, to: offset });
+      lineStart = offset + node.nodeSize;
+    }
+  });
+  if (!lines.length) return false;
+  lines.push({ from: lineStart, to: paragraph.content.size });
+
+  const paragraphStart = $from.start();
+  const first = lines.findIndex((line) => paragraphStart + line.from < selection.to && paragraphStart + line.to > selection.from);
+  let last = -1;
+  lines.forEach((line, index) => {
+    if (paragraphStart + line.from < selection.to && paragraphStart + line.to > selection.from) last = index;
+  });
+  if (first < 0 || last < first) return false;
+
+  const paragraphType = schema.nodes.paragraph;
+  const itemType = schema.nodes[value === "taskList" ? "taskItem" : "listItem"];
+  const listType = schema.nodes[value];
+  const before = first ? paragraphType.create(paragraph.attrs, paragraph.content.cut(0, lines[first].from - 1)) : null;
+  const after = last < lines.length - 1
+    ? paragraphType.create(paragraph.attrs, paragraph.content.cut(lines[last].to + 1))
+    : null;
+  const items = lines.slice(first, last + 1).map((line) => itemType.create(
+    value === "taskList" ? { checked: false } : null,
+    paragraphType.create(paragraph.attrs, paragraph.content.cut(line.from, line.to)),
+  ));
+  const list = listType.create(null, items);
+  const replacement = [before, list, after].filter((node) => node !== null);
+  const blockStart = $from.before(1);
+  const transaction = editor.state.tr.replaceWith(blockStart, blockStart + paragraph.nodeSize, replacement);
+  transaction.setSelection(Selection.near(transaction.doc.resolve(blockStart + (before?.nodeSize ?? 0) + 3)));
+  editor.view.dispatch(transaction.scrollIntoView());
+  editor.view.focus();
+  return true;
 }
 
 export function moveTopLevelBlock(editor: Editor, fromIndex: number, beforeIndex: number): boolean {

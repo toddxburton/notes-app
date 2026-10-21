@@ -36,9 +36,21 @@ npx supabase db push
 
 Set the project URL and publishable key in `.env.production`, then use `https://noted.toddxburton.com` as the Supabase Auth site URL. Add both `https://noted.toddxburton.com/**` and `https://notes.toddxburton.com/**` to the redirect allow list during the hostname transition. The migration enables row-level security for every exposed table. Each signed-in user can access only rows owned by their Supabase user ID.
 
-This is an existing-account-only workspace. Provision the owner account before disabling signups. Keep new user signups disabled in the hosted Supabase Auth settings as well as in `supabase/config.toml`; the browser's magic-link request also sets `shouldCreateUser: false`. Hosted Auth settings are separate from the app build and database migrations.
+This is an existing-account-only workspace. Provision the owner account before disabling signups. Keep new user signups disabled in the hosted Supabase Auth settings as well as in `supabase/config.toml`; the browser's email-link request also sets `shouldCreateUser: false`. Password sign-in uses the same existing account and does not create a new one. Hosted Auth settings are separate from the app build and database migrations.
 
 Editing uses a local-first save path. Each title or body change is cached in browser storage immediately. Supabase receives the combined update after five seconds without typing, or when the editor loses focus. A newer browser draft is preserved across reloads and takes precedence over an older realtime snapshot until cloud sync succeeds.
+
+## Phone installation and offline notes
+
+The production build includes a web app manifest, install icons, and a service worker. Open `https://noted.toddxburton.com` in Arc Search on iPhone and use its Share menu → Add to Home Screen if available. If Arc does not offer that action, open the site in Safari once and use Share → Add to Home Screen. Launch Noted from the new icon and sign in there; the installed app has its own browser storage.
+
+The installed app must be opened and signed in while online once. After that, cached notes can be read and their titles and bodies edited offline, and new notes can be created. Changes are queued in owner-scoped IndexedDB and sync when the app reconnects with a valid session. If the server note changed first, the phone edit becomes a separate note titled with `(offline conflict)` in the same project. Based caches its catalog and table pages you've opened for read-only viewing offline; edits and workspace import/export need a connection. Pending note edits stay on the device through reloads and sign-out and appear again only for the same account.
+
+Password sign-in is the primary path. If already signed in through Arc, open Noted Settings and create a password for the existing account. Then open the home-screen app and sign in with the same email and password; this does not send an email. The email-link option remains available as a backup. For that path, request a fresh email in the installed app, copy its complete **Sign in** link without opening it, and paste it into Noted. Links are single use; opening one in Arc first consumes it, and requesting another email can invalidate an older link. Supabase's built-in email sender limits backup links to two emails per hour.
+
+Noted persists the Supabase session and refreshes its short-lived access token automatically. With the default hosted session policy, signing in once in the installed app should keep it signed in until sign-out, browser storage is cleared, or the server revokes the session. Arc and the installed app can have separate browser storage, so signing in to Arc does not necessarily sign in to the home-screen app.
+
+For release checks, use the actual iPhone to test Arc's installation menu, icon and standalone launch, password sign-in, fresh pasted-link backup sign-in, offline reopen/edit/new note, interrupted sync, expired session, and a conflicting edit from another device. Check portrait and landscape, including 320px and 375px widths and the keyboard open. Android install and layout are secondary checks. `npm run deploy:dry` verifies the Worker bundle; `npx wrangler dev --local` serves the built app through the local Worker for HTTP checks.
 
 ## Backups and recovery
 
